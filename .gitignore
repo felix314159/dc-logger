@@ -1,0 +1,18 @@
+# Local SQLite artifacts
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local environment secrets
+.env
+.env.*
+!.env.example
+
+# Local build artifacts
+/dc-logger
+/dc-query
+*.exe
+*.out
+*.test
