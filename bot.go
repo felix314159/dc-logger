@@ -610,12 +610,12 @@ func registerHandlers(
 			}
 			guildName := resolveGuildDisplayName(s, db, g)
 			if err := upsertGuildName(stmts.upsertIDNameMapping, g.ID, guildName, now); err != nil {
-				log.Printf("guild name mapping upsert failed (guild=%s): %v", g.ID, err)
+				logDBErr("guild name mapping upsert failed (guild=%s): %v", g.ID, err)
 			}
 			upsertRolesFromGuild(stmts, g, now)
 			syncMemberRolesFromGuild(stmts, g, now)
 			if err := syncMemberRolesFromGuildAPI(s, stmts, g.ID, now); err != nil {
-				log.Printf("guild member-role snapshot sync failed (guild=%s): %v", g.ID, err)
+				logDBErr("guild member-role snapshot sync failed (guild=%s): %v", g.ID, err)
 			}
 		}
 
@@ -810,7 +810,7 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	if m.Content == "" && len(m.Attachments) == 0 {
 		logSkippedMessageCreate(m, "structural_empty_message")
 		if err := updateHighWaterMark(db, stmts.upsertState, m.GuildID, m.ChannelID, m.ID); err != nil {
-			log.Printf("state update failed (channel=%s): %v", m.ChannelID, err)
+			logDBErr("state update failed (channel=%s): %v", m.ChannelID, err)
 		}
 		return
 	}
@@ -818,20 +818,20 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	if err := upsertGuildFromState(s, stmts.upsertIDNameMapping, m.GuildID, now); err != nil {
-		log.Printf("guild name mapping upsert failed (guild=%s): %v", m.GuildID, err)
+		logDBErr("guild name mapping upsert failed (guild=%s): %v", m.GuildID, err)
 	}
 
 	// Upsert user metadata (latest known).
 	if m.Author != nil {
 		if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, m.GuildID, m.Author, now); err != nil {
-			log.Printf("user upsert failed (author=%s): %v", m.Author.ID, err)
+			logDBErr("user upsert failed (author=%s): %v", m.Author.ID, err)
 		}
 	}
 
 	// Upsert channel/thread metadata best-effort.
 	// We avoid extra API calls: try session state first; if not found, store minimal row.
 	if err := upsertChannelFromMessage(s, stmts.upsertChannel, stmts.upsertIDNameMapping, m.GuildID, m.ChannelID, now); err != nil {
-		log.Printf("channel upsert failed (channel=%s): %v", m.ChannelID, err)
+		logDBErr("channel upsert failed (channel=%s): %v", m.ChannelID, err)
 	}
 
 	authorID := ""
@@ -847,7 +847,7 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 			senderName = authorID
 		}
 		if err := upsertGuildMemberRow(stmts.upsertGuildMember, m.GuildID, authorID, now); err != nil {
-			log.Printf("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, authorID, err)
+			logDBErr("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, authorID, err)
 		}
 	}
 
@@ -869,7 +869,7 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 			rel.threadID,
 			rel.threadParentID,
 		); err != nil {
-			log.Printf("db insert failed (msg=%s): %v", m.ID, err)
+			logDBErr("db insert failed (msg=%s): %v", m.ID, err)
 			return
 		}
 	}
@@ -893,7 +893,7 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	recordRolePings(stmts, s, m.GuildID, m.ChannelID, m.ID, authorID, createdAt, m.MentionRoles)
 
 	if err := updateHighWaterMark(db, stmts.upsertState, m.GuildID, m.ChannelID, m.ID); err != nil {
-		log.Printf("state update failed (channel=%s): %v", m.ChannelID, err)
+		logDBErr("state update failed (channel=%s): %v", m.ChannelID, err)
 	}
 
 	sentPayload := map[string]any{
@@ -902,17 +902,21 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		"embeds_count":      len(m.Embeds),
 		"sender_name":       senderName,
 	}
-	if err := recordLifecycleEvent(
-		stmts.insertEvent,
-		eventMessageSent,
+	inserted, err := insertMessageSentLifecycleEventDedup(
+		stmts.insertMessageSentEventDedup,
 		m.GuildID,
 		m.ChannelID,
 		m.ID,
 		authorID,
 		createdAt,
 		sentPayload,
-	); err != nil {
-		log.Printf("event insert failed (type=%s msg=%s): %v", eventMessageSent, m.ID, err)
+	)
+	if err != nil {
+		logDBErr("event insert failed (type=%s msg=%s): %v", eventMessageSent, m.ID, err)
+		return
+	}
+	if !inserted {
+		return
 	}
 
 	logContent := messageSentLogContent(m.Content, attachmentLogContent)
@@ -959,25 +963,25 @@ func handleMessageUpdate(s *discordgo.Session, stmts *preparedStatements, m *dis
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	if err := upsertGuildFromState(s, stmts.upsertIDNameMapping, m.GuildID, now); err != nil {
-		log.Printf("guild name mapping upsert failed (guild=%s): %v", m.GuildID, err)
+		logDBErr("guild name mapping upsert failed (guild=%s): %v", m.GuildID, err)
 	}
 	authorID := ""
 	if m.Author != nil {
 		authorID = m.Author.ID
 		if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, m.GuildID, m.Author, now); err != nil {
-			log.Printf("user upsert failed (author=%s): %v", m.Author.ID, err)
+			logDBErr("user upsert failed (author=%s): %v", m.Author.ID, err)
 		}
 	}
 
 	if err := upsertChannelFromMessage(s, stmts.upsertChannel, stmts.upsertIDNameMapping, m.GuildID, m.ChannelID, now); err != nil {
-		log.Printf("channel upsert failed (channel=%s): %v", m.ChannelID, err)
+		logDBErr("channel upsert failed (channel=%s): %v", m.ChannelID, err)
 	}
 
 	editedAt := ""
 	if m.EditedTimestamp != nil && !m.EditedTimestamp.IsZero() {
 		editedAt = m.EditedTimestamp.UTC().Format(time.RFC3339Nano)
 		if _, err := stmts.markMessageEdited.Exec(m.Content, editedAt, m.ID); err != nil {
-			log.Printf("mark message edited failed (msg=%s): %v", m.ID, err)
+			logDBErr("mark message edited failed (msg=%s): %v", m.ID, err)
 		}
 	}
 
@@ -1002,7 +1006,7 @@ func handleMessageUpdate(s *discordgo.Session, stmts *preparedStatements, m *dis
 		payload,
 	)
 	if err != nil {
-		log.Printf("event insert failed (type=%s msg=%s): %v", eventMessageUpdated, m.ID, err)
+		logDBErr("event insert failed (type=%s msg=%s): %v", eventMessageUpdated, m.ID, err)
 		return
 	}
 	if !inserted {
@@ -1017,6 +1021,38 @@ func handleMessageUpdate(s *discordgo.Session, stmts *preparedStatements, m *dis
 		authorID,
 		payload,
 	)
+}
+
+func insertMessageSentLifecycleEventDedup(
+	stmt *sql.Stmt,
+	guildID, channelID, messageID, actorID, occurredAt string,
+	payload map[string]any,
+) (bool, error) {
+	if stmt == nil {
+		return false, fmt.Errorf("nil message_sent dedup statement")
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	res, err := stmt.Exec(
+		string(eventMessageSent),
+		guildID,
+		channelID,
+		messageID,
+		actorID,
+		occurredAt,
+		string(payloadJSON),
+		messageID,
+	)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 func insertMessageUpdatedLifecycleEventDedup(
@@ -1069,10 +1105,10 @@ func handleMessageDelete(stmts *preparedStatements, m *discordgo.MessageDelete) 
 	deletedAt := time.Now().UTC().Format(time.RFC3339Nano)
 
 	if _, err := stmts.markMessageDeleted.Exec(deletedAt, m.ID); err != nil {
-		log.Printf("mark message deleted failed (msg=%s): %v", m.ID, err)
+		logDBErr("mark message deleted failed (msg=%s): %v", m.ID, err)
 	}
 	if _, err := stmts.markAttachmentsDeletedByMessage.Exec(deletedAt, deletedAt, m.ID); err != nil {
-		log.Printf("mark attachments deleted failed (msg=%s): %v", m.ID, err)
+		logDBErr("mark attachments deleted failed (msg=%s): %v", m.ID, err)
 	}
 
 	actorID := ""
@@ -1097,7 +1133,7 @@ func handleMessageDelete(stmts *preparedStatements, m *discordgo.MessageDelete) 
 		deletedAt,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s msg=%s): %v", eventMessageDeleted, m.ID, err)
+		logDBErr("event insert failed (type=%s msg=%s): %v", eventMessageDeleted, m.ID, err)
 	}
 
 	logTrackedEvent(
@@ -1117,7 +1153,7 @@ func handleGuildCreate(stmts *preparedStatements, g *discordgo.GuildCreate) {
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertGuildName(stmts.upsertIDNameMapping, g.ID, g.Name, now); err != nil {
-		log.Printf("guild name mapping upsert failed (guild=%s): %v", g.ID, err)
+		logDBErr("guild name mapping upsert failed (guild=%s): %v", g.ID, err)
 	}
 	upsertRolesFromGuild(stmts, g.Guild, now)
 	syncMemberRolesFromGuild(stmts, g.Guild, now)
@@ -1131,7 +1167,7 @@ func handleGuildUpdate(db *sql.DB, stmts *preparedStatements, g *discordgo.Guild
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	beforeName := currentMappedName(db, nameMappingEntityGuild, g.ID, g.ID)
 	if err := upsertGuildName(stmts.upsertIDNameMapping, g.ID, g.Name, now); err != nil {
-		log.Printf("guild name mapping upsert failed (guild=%s): %v", g.ID, err)
+		logDBErr("guild name mapping upsert failed (guild=%s): %v", g.ID, err)
 	}
 	upsertRolesFromGuild(stmts, g.Guild, now)
 	syncMemberRolesFromGuild(stmts, g.Guild, now)
@@ -1151,7 +1187,7 @@ func handleGuildUpdate(db *sql.DB, stmts *preparedStatements, g *discordgo.Guild
 			now,
 			payload,
 		); err != nil {
-			log.Printf("event insert failed (type=%s guild=%s): %v", eventGuildRenamed, g.ID, err)
+			logDBErr("event insert failed (type=%s guild=%s): %v", eventGuildRenamed, g.ID, err)
 		}
 		logTrackedEvent(eventGuildRenamed, g.ID, "", "", "", payload)
 	}
@@ -1163,7 +1199,7 @@ func handleGuildRoleCreate(stmts *preparedStatements, r *discordgo.GuildRoleCrea
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertRoleRow(stmts.upsertRole, stmts.upsertIDNameMapping, r.GuildID, r.Role, now); err != nil {
-		log.Printf("role upsert failed (guild=%s role=%s): %v", r.GuildID, r.Role.ID, err)
+		logDBErr("role upsert failed (guild=%s role=%s): %v", r.GuildID, r.Role.ID, err)
 	}
 }
 
@@ -1174,7 +1210,7 @@ func handleGuildRoleUpdate(db *sql.DB, stmts *preparedStatements, r *discordgo.G
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	beforeName := currentMappedName(db, nameMappingEntityRole, r.Role.ID, r.GuildID)
 	if err := upsertRoleRow(stmts.upsertRole, stmts.upsertIDNameMapping, r.GuildID, r.Role, now); err != nil {
-		log.Printf("role upsert failed (guild=%s role=%s): %v", r.GuildID, r.Role.ID, err)
+		logDBErr("role upsert failed (guild=%s role=%s): %v", r.GuildID, r.Role.ID, err)
 	}
 	afterName := strings.TrimSpace(r.Role.Name)
 	if beforeName == "" || afterName == "" || beforeName == afterName {
@@ -1197,7 +1233,7 @@ func handleGuildRoleUpdate(db *sql.DB, stmts *preparedStatements, r *discordgo.G
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s role=%s): %v", eventRoleRenamed, r.Role.ID, err)
+		logDBErr("event insert failed (type=%s role=%s): %v", eventRoleRenamed, r.Role.ID, err)
 	}
 	logTrackedEvent(eventRoleRenamed, r.GuildID, "", "", "", payload)
 }
@@ -1208,7 +1244,7 @@ func handleGuildRoleDelete(stmts *preparedStatements, r *discordgo.GuildRoleDele
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := stmts.markRoleDeleted.Exec(now, now, r.RoleID, r.GuildID); err != nil {
-		log.Printf("mark role deleted failed (guild=%s role=%s): %v", r.GuildID, r.RoleID, err)
+		logDBErr("mark role deleted failed (guild=%s role=%s): %v", r.GuildID, r.RoleID, err)
 	}
 
 	payload := map[string]any{
@@ -1225,7 +1261,7 @@ func handleGuildRoleDelete(stmts *preparedStatements, r *discordgo.GuildRoleDele
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s role=%s): %v", eventRoleDeleted, r.RoleID, err)
+		logDBErr("event insert failed (type=%s role=%s): %v", eventRoleDeleted, r.RoleID, err)
 	}
 	logTrackedEvent(eventRoleDeleted, r.GuildID, "", "", "", payload)
 }
@@ -1236,13 +1272,13 @@ func handleGuildMemberAdd(stmts *preparedStatements, m *discordgo.GuildMemberAdd
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, m.GuildID, m.User, now); err != nil {
-		log.Printf("user upsert failed (author=%s): %v", m.User.ID, err)
+		logDBErr("user upsert failed (author=%s): %v", m.User.ID, err)
 	}
 	if err := upsertGuildMemberRow(stmts.upsertGuildMember, m.GuildID, m.User.ID, now); err != nil {
-		log.Printf("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
+		logDBErr("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
 	}
 	if err := setMemberRolesSnapshot(stmts, m.GuildID, m.User.ID, m.Roles, now); err != nil {
-		log.Printf("member role snapshot failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
+		logDBErr("member role snapshot failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
 	}
 
 	payload := userLifecyclePayload(m.User)
@@ -1262,7 +1298,7 @@ func handleGuildMemberAdd(stmts *preparedStatements, m *discordgo.GuildMemberAdd
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s user=%s): %v", eventUserJoined, m.User.ID, err)
+		logDBErr("event insert failed (type=%s user=%s): %v", eventUserJoined, m.User.ID, err)
 	}
 	logTrackedEvent(eventUserJoined, m.GuildID, "", "", m.User.ID, payload)
 }
@@ -1273,10 +1309,10 @@ func handleGuildMemberRemove(s *discordgo.Session, stmts *preparedStatements, m 
 	}
 	now := time.Now().UTC()
 	if _, err := stmts.deleteMemberRolesByUser.Exec(m.GuildID, m.User.ID); err != nil {
-		log.Printf("member role cleanup failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
+		logDBErr("member role cleanup failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
 	}
 	if err := deleteGuildMemberRow(stmts.deleteGuildMember, m.GuildID, m.User.ID); err != nil {
-		log.Printf("guild member cleanup failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
+		logDBErr("guild member cleanup failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
 	}
 
 	cause, auditEntry := inferMemberRemovalCause(s, m.GuildID, m.User.ID, now)
@@ -1313,7 +1349,7 @@ func handleGuildMemberRemove(s *discordgo.Session, stmts *preparedStatements, m 
 		now.Format(time.RFC3339Nano),
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s user=%s): %v", eventType, m.User.ID, err)
+		logDBErr("event insert failed (type=%s user=%s): %v", eventType, m.User.ID, err)
 	}
 	logTrackedEvent(eventType, m.GuildID, "", "", actorID, payload)
 }
@@ -1324,10 +1360,10 @@ func handleGuildBanAdd(s *discordgo.Session, stmts *preparedStatements, b *disco
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := deleteGuildMemberRow(stmts.deleteGuildMember, b.GuildID, b.User.ID); err != nil {
-		log.Printf("guild member cleanup failed on ban (guild=%s user=%s): %v", b.GuildID, b.User.ID, err)
+		logDBErr("guild member cleanup failed on ban (guild=%s user=%s): %v", b.GuildID, b.User.ID, err)
 	}
 	if _, err := stmts.deleteMemberRolesByUser.Exec(b.GuildID, b.User.ID); err != nil {
-		log.Printf("member role cleanup failed on ban (guild=%s user=%s): %v", b.GuildID, b.User.ID, err)
+		logDBErr("member role cleanup failed on ban (guild=%s user=%s): %v", b.GuildID, b.User.ID, err)
 	}
 
 	payload := userLifecyclePayload(b.User)
@@ -1358,7 +1394,7 @@ func handleGuildBanAdd(s *discordgo.Session, stmts *preparedStatements, b *disco
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s user=%s): %v", eventUserBanned, b.User.ID, err)
+		logDBErr("event insert failed (type=%s user=%s): %v", eventUserBanned, b.User.ID, err)
 	}
 	logTrackedEvent(eventUserBanned, b.GuildID, "", "", actorID, payload)
 }
@@ -1373,13 +1409,13 @@ func handleGuildMemberUpdate(db *sql.DB, stmts *preparedStatements, m *discordgo
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, m.GuildID, m.User, now); err != nil {
-		log.Printf("user upsert failed (author=%s): %v", m.User.ID, err)
+		logDBErr("user upsert failed (author=%s): %v", m.User.ID, err)
 	}
 	if err := upsertGuildMemberRow(stmts.upsertGuildMember, m.GuildID, m.User.ID, now); err != nil {
-		log.Printf("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
+		logDBErr("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
 	}
 	if err := setMemberRolesSnapshot(stmts, m.GuildID, m.User.ID, m.Roles, now); err != nil {
-		log.Printf("member role snapshot failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
+		logDBErr("member role snapshot failed (guild=%s user=%s): %v", m.GuildID, m.User.ID, err)
 	}
 
 	var (
@@ -1412,7 +1448,7 @@ func handleGuildMemberUpdate(db *sql.DB, stmts *preparedStatements, m *discordgo
 			now,
 			payload,
 		); err != nil {
-			log.Printf("event insert failed (type=%s user=%s role=%s): %v", eventRoleAssigned, m.User.ID, roleID, err)
+			logDBErr("event insert failed (type=%s user=%s role=%s): %v", eventRoleAssigned, m.User.ID, roleID, err)
 		}
 		logTrackedEvent(eventRoleAssigned, m.GuildID, "", "", m.User.ID, payload)
 	}
@@ -1439,7 +1475,7 @@ func handleGuildMemberUpdate(db *sql.DB, stmts *preparedStatements, m *discordgo
 			now,
 			payload,
 		); err != nil {
-			log.Printf("event insert failed (type=%s user=%s role=%s): %v", eventRoleRevoked, m.User.ID, roleID, err)
+			logDBErr("event insert failed (type=%s user=%s role=%s): %v", eventRoleRevoked, m.User.ID, roleID, err)
 		}
 		logTrackedEvent(eventRoleRevoked, m.GuildID, "", "", m.User.ID, payload)
 	}
@@ -1481,7 +1517,7 @@ func handleGuildMemberUpdate(db *sql.DB, stmts *preparedStatements, m *discordgo
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s user=%s): %v", eventUsernameChanged, m.User.ID, err)
+		logDBErr("event insert failed (type=%s user=%s): %v", eventUsernameChanged, m.User.ID, err)
 	}
 	logTrackedEvent(eventUsernameChanged, m.GuildID, "", "", m.User.ID, payload)
 }
@@ -1493,7 +1529,7 @@ func handleChannelCreate(stmts *preparedStatements, c *discordgo.ChannelCreate) 
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, c.GuildID, c.Channel, now); err != nil {
-		log.Printf("channel upsert failed (channel=%s): %v", c.ID, err)
+		logDBErr("channel upsert failed (channel=%s): %v", c.ID, err)
 	}
 
 	if err := recordLifecycleEvent(
@@ -1506,7 +1542,7 @@ func handleChannelCreate(stmts *preparedStatements, c *discordgo.ChannelCreate) 
 		now,
 		channelEventPayload(c.Channel),
 	); err != nil {
-		log.Printf("event insert failed (type=%s channel=%s): %v", eventChannelCreated, c.ID, err)
+		logDBErr("event insert failed (type=%s channel=%s): %v", eventChannelCreated, c.ID, err)
 	}
 
 	logTrackedEvent(
@@ -1526,7 +1562,7 @@ func handleChannelUpdate(stmts *preparedStatements, c *discordgo.ChannelUpdate) 
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, c.GuildID, c.Channel, now); err != nil {
-		log.Printf("channel upsert failed (channel=%s): %v", c.ID, err)
+		logDBErr("channel upsert failed (channel=%s): %v", c.ID, err)
 	}
 
 	if c.BeforeUpdate == nil {
@@ -1553,7 +1589,7 @@ func handleChannelUpdate(stmts *preparedStatements, c *discordgo.ChannelUpdate) 
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s channel=%s): %v", eventChannelRenamed, c.ID, err)
+		logDBErr("event insert failed (type=%s channel=%s): %v", eventChannelRenamed, c.ID, err)
 	}
 	logTrackedEvent(eventChannelRenamed, c.GuildID, c.ID, "", "", payload)
 }
@@ -1565,7 +1601,7 @@ func handleChannelDelete(stmts *preparedStatements, c *discordgo.ChannelDelete) 
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := stmts.markChannelDeleted.Exec(now, now, c.ID); err != nil {
-		log.Printf("mark channel deleted failed (channel=%s): %v", c.ID, err)
+		logDBErr("mark channel deleted failed (channel=%s): %v", c.ID, err)
 	}
 
 	if err := recordLifecycleEvent(
@@ -1578,7 +1614,7 @@ func handleChannelDelete(stmts *preparedStatements, c *discordgo.ChannelDelete) 
 		now,
 		channelEventPayload(c.Channel),
 	); err != nil {
-		log.Printf("event insert failed (type=%s channel=%s): %v", eventChannelDeleted, c.ID, err)
+		logDBErr("event insert failed (type=%s channel=%s): %v", eventChannelDeleted, c.ID, err)
 	}
 
 	logTrackedEvent(
@@ -1598,7 +1634,7 @@ func handleThreadCreate(stmts *preparedStatements, t *discordgo.ThreadCreate) {
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, t.GuildID, t.Channel, now); err != nil {
-		log.Printf("thread upsert failed (thread=%s): %v", t.ID, err)
+		logDBErr("thread upsert failed (thread=%s): %v", t.ID, err)
 	}
 
 	payload := channelEventPayload(t.Channel)
@@ -1613,7 +1649,7 @@ func handleThreadCreate(stmts *preparedStatements, t *discordgo.ThreadCreate) {
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s thread=%s): %v", eventThreadCreated, t.ID, err)
+		logDBErr("event insert failed (type=%s thread=%s): %v", eventThreadCreated, t.ID, err)
 	}
 
 	logTrackedEvent(
@@ -1633,7 +1669,7 @@ func handleThreadUpdate(stmts *preparedStatements, t *discordgo.ThreadUpdate) {
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, t.GuildID, t.Channel, now); err != nil {
-		log.Printf("thread upsert failed (thread=%s): %v", t.ID, err)
+		logDBErr("thread upsert failed (thread=%s): %v", t.ID, err)
 	}
 
 	if t.BeforeUpdate == nil {
@@ -1661,7 +1697,7 @@ func handleThreadUpdate(stmts *preparedStatements, t *discordgo.ThreadUpdate) {
 		now,
 		payload,
 	); err != nil {
-		log.Printf("event insert failed (type=%s thread=%s): %v", eventThreadRenamed, t.ID, err)
+		logDBErr("event insert failed (type=%s thread=%s): %v", eventThreadRenamed, t.ID, err)
 	}
 	logTrackedEvent(eventThreadRenamed, t.GuildID, t.ID, "", "", payload)
 }
@@ -1673,7 +1709,7 @@ func handleThreadDelete(stmts *preparedStatements, t *discordgo.ThreadDelete) {
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := stmts.markChannelDeleted.Exec(now, now, t.ID); err != nil {
-		log.Printf("mark thread deleted failed (thread=%s): %v", t.ID, err)
+		logDBErr("mark thread deleted failed (thread=%s): %v", t.ID, err)
 	}
 
 	if err := recordLifecycleEvent(
@@ -1686,7 +1722,7 @@ func handleThreadDelete(stmts *preparedStatements, t *discordgo.ThreadDelete) {
 		now,
 		channelEventPayload(t.Channel),
 	); err != nil {
-		log.Printf("event insert failed (type=%s thread=%s): %v", eventThreadDeleted, t.ID, err)
+		logDBErr("event insert failed (type=%s thread=%s): %v", eventThreadDeleted, t.ID, err)
 	}
 
 	logTrackedEvent(

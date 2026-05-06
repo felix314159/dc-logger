@@ -224,7 +224,7 @@ func backfillGuild(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, 
 
 		lastID, err := getLastMessageID(db, c.ID)
 		if err != nil {
-			log.Printf("state read failed (channel=%s): %v", c.ID, err)
+			logDBErr("state read failed (channel=%s): %v", c.ID, err)
 			lastID = ""
 		}
 		if lastID == "" {
@@ -234,7 +234,7 @@ func backfillGuild(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, 
 			} else if resumeID != "" {
 				lastID = resumeID
 				if err := setHighWaterMark(stmts.upsertState, guildID, c.ID, resumeID); err != nil {
-					log.Printf("state seed failed (channel=%s): %v", c.ID, err)
+					logDBErr("state seed failed (channel=%s): %v", c.ID, err)
 				}
 				log.Printf(
 					"state missing for channel=%s; resuming incremental sync from latest stored message_id=%s",
@@ -273,7 +273,7 @@ func backfillGuild(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, 
 		}
 		if newMax != "" && snowflakeGreater(newMax, lastID) {
 			if err := setHighWaterMark(stmts.upsertState, guildID, c.ID, newMax); err != nil {
-				log.Printf("state write failed (channel=%s): %v", c.ID, err)
+				logDBErr("state write failed (channel=%s): %v", c.ID, err)
 			}
 		}
 
@@ -670,10 +670,10 @@ func persistBackfillMessage(
 	createdAt := normalizeTimestamp(m.Timestamp)
 	rel := deriveMessageRelationship(s, m, fallbackThreadParentID)
 	if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, guildID, m.Author, createdAt); err != nil {
-		log.Printf("backfill user upsert failed (author=%s): %v", m.Author.ID, err)
+		logDBErr("backfill user upsert failed (author=%s): %v", m.Author.ID, err)
 	}
 	if err := upsertGuildMemberRow(stmts.upsertGuildMember, guildID, m.Author.ID, createdAt); err != nil {
-		log.Printf("backfill guild member upsert failed (author=%s): %v", m.Author.ID, err)
+		logDBErr("backfill guild member upsert failed (author=%s): %v", m.Author.ID, err)
 	}
 	if m.Content != "" {
 		if _, err := stmts.insertMsg.Exec(
@@ -758,7 +758,7 @@ func loadArchivedDiscoveryState(db *sql.DB, guildID string) map[string]time.Time
 	}
 	rows, err := db.Query(selectArchivedDiscoveryStateByGuildQuery, guildID)
 	if err != nil {
-		log.Printf("loadArchivedDiscoveryState guild=%s failed: %v", guildID, err)
+		logDBErr("loadArchivedDiscoveryState guild=%s failed: %v", guildID, err)
 		return state
 	}
 	defer rows.Close()
@@ -766,7 +766,7 @@ func loadArchivedDiscoveryState(db *sql.DB, guildID string) map[string]time.Time
 		var parentID, lastCheckedAt string
 		var threadsFound int
 		if err := rows.Scan(&parentID, &lastCheckedAt, &threadsFound); err != nil {
-			log.Printf("loadArchivedDiscoveryState scan failed: %v", err)
+			logDBErr("loadArchivedDiscoveryState scan failed: %v", err)
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, lastCheckedAt)
@@ -784,6 +784,6 @@ func saveArchivedDiscoveryState(stmt *sql.Stmt, parentChannelID, guildID string,
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := stmt.Exec(parentChannelID, guildID, now, threadsFound); err != nil {
-		log.Printf("saveArchivedDiscoveryState parent=%s failed: %v", parentChannelID, err)
+		logDBErr("saveArchivedDiscoveryState parent=%s failed: %v", parentChannelID, err)
 	}
 }

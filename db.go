@@ -17,6 +17,7 @@ type preparedStatements struct {
 	markMessageDeleted              *sql.Stmt
 	markAttachmentsDeletedByMessage *sql.Stmt
 	insertEvent                     *sql.Stmt
+	insertMessageSentEventDedup     *sql.Stmt
 	insertMessageUpdatedEventDedup  *sql.Stmt
 	upsertState                     *sql.Stmt
 	upsertChannel                   *sql.Stmt
@@ -124,6 +125,14 @@ func prepareStatements(db *sql.DB) (*preparedStatements, error) {
 		return nil, err
 	}
 	if err := prepare(
+		&stmts.insertMessageSentEventDedup,
+		insertMessageSentLifecycleEventDedupQuery,
+		"message_sent lifecycle event dedup insert",
+	); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err := prepare(
 		&stmts.insertMessageUpdatedEventDedup,
 		insertMessageUpdatedLifecycleEventDedupQuery,
 		"message_updated lifecycle event dedup insert",
@@ -148,7 +157,7 @@ func closePreparedStatements(stmts *preparedStatements) {
 			return
 		}
 		if err := stmt.Close(); err != nil {
-			log.Printf("close %s statement failed: %v", name, err)
+			logDBErr("close %s statement failed: %v", name, err)
 		}
 	}
 
@@ -158,6 +167,7 @@ func closePreparedStatements(stmts *preparedStatements) {
 	closeStmt("mark message deleted", stmts.markMessageDeleted)
 	closeStmt("mark attachments deleted", stmts.markAttachmentsDeletedByMessage)
 	closeStmt("insert lifecycle event", stmts.insertEvent)
+	closeStmt("insert message_sent lifecycle event dedup", stmts.insertMessageSentEventDedup)
 	closeStmt("insert message_updated lifecycle event dedup", stmts.insertMessageUpdatedEventDedup)
 	closeStmt("upsert state", stmts.upsertState)
 	closeStmt("upsert channel", stmts.upsertChannel)
@@ -247,6 +257,33 @@ func isFTSUnavailableError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "fts5") || strings.Contains(msg, "no such module")
+}
+
+// isDatabaseBusyErr reports whether err is a transient SQLite busy/locked
+// condition. Such errors are expected under contention with the WAL writer
+// and are deliberately swallowed by callers to keep logs quiet.
+func isDatabaseBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "SQLITE_LOCKED") ||
+		strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked")
+}
+
+// logDBErr is the SQLite-aware counterpart to log.Printf for database
+// operation failures. It assumes the trailing argument is the underlying
+// error (matching the "...: %v" format used at call sites) and silently
+// drops the line when that error is a transient busy/locked condition.
+func logDBErr(format string, args ...any) {
+	if n := len(args); n > 0 {
+		if e, ok := args[n-1].(error); ok && isDatabaseBusyErr(e) {
+			return
+		}
+	}
+	log.Printf(format, args...)
 }
 
 func runFTSStartupMaintenance(db *sql.DB) error {

@@ -44,7 +44,7 @@ func upsertRolesFromGuild(stmts *preparedStatements, g *discordgo.Guild, now str
 	}
 	for _, r := range g.Roles {
 		if err := upsertRoleRow(stmts.upsertRole, stmts.upsertIDNameMapping, g.ID, r, now); err != nil {
-			log.Printf("role upsert failed (guild=%s role=%s): %v", g.ID, roleIDOf(r), err)
+			logDBErr("role upsert failed (guild=%s role=%s): %v", g.ID, roleIDOf(r), err)
 		}
 	}
 }
@@ -58,10 +58,10 @@ func syncMemberRolesFromGuild(stmts *preparedStatements, g *discordgo.Guild, now
 			continue
 		}
 		if err := upsertGuildMemberRow(stmts.upsertGuildMember, g.ID, m.User.ID, now); err != nil {
-			log.Printf("guild member upsert failed (guild=%s user=%s): %v", g.ID, m.User.ID, err)
+			logDBErr("guild member upsert failed (guild=%s user=%s): %v", g.ID, m.User.ID, err)
 		}
 		if err := setMemberRolesSnapshot(stmts, g.ID, m.User.ID, m.Roles, now); err != nil {
-			log.Printf("member role snapshot failed (guild=%s user=%s): %v", g.ID, m.User.ID, err)
+			logDBErr("member role snapshot failed (guild=%s user=%s): %v", g.ID, m.User.ID, err)
 		}
 	}
 }
@@ -97,13 +97,13 @@ func syncMemberRolesFromGuildAPI(s *discordgo.Session, stmts *preparedStatements
 				continue
 			}
 			if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, guildID, m.User, now); err != nil {
-				log.Printf("user upsert failed (guild=%s user=%s): %v", guildID, m.User.ID, err)
+				logDBErr("user upsert failed (guild=%s user=%s): %v", guildID, m.User.ID, err)
 			}
 			if err := upsertGuildMemberRow(stmts.upsertGuildMember, guildID, m.User.ID, now); err != nil {
-				log.Printf("guild member upsert failed (guild=%s user=%s): %v", guildID, m.User.ID, err)
+				logDBErr("guild member upsert failed (guild=%s user=%s): %v", guildID, m.User.ID, err)
 			}
 			if err := setMemberRolesSnapshot(stmts, guildID, m.User.ID, m.Roles, now); err != nil {
-				log.Printf("member role snapshot failed (guild=%s user=%s): %v", guildID, m.User.ID, err)
+				logDBErr("member role snapshot failed (guild=%s user=%s): %v", guildID, m.User.ID, err)
 			}
 			totalMembers++
 			totalRoles += len(normalizeUniqueIDs(m.Roles))

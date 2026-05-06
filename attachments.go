@@ -74,7 +74,7 @@ func upsertMessageAttachments(
 			now,
 			"",
 		); err != nil {
-			log.Printf("attachment upsert failed (attachment=%s message=%s): %v", a.ID, messageID, err)
+			logDBErr("attachment upsert failed (attachment=%s message=%s): %v", a.ID, messageID, err)
 			continue
 		}
 		inserted++

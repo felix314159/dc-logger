@@ -711,6 +711,19 @@ WHERE NOT EXISTS (
 );
 `
 
+const insertMessageSentLifecycleEventDedupQuery = `
+INSERT INTO lifecycle_events(
+	event_type, guild_id, channel_id, message_id, actor_id, occurred_at, payload_json
+)
+SELECT ?, ?, ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+	SELECT 1
+	FROM lifecycle_events
+	WHERE event_type = 'message_sent'
+		AND message_id = ?
+);
+`
+
 const getLastMessageIDByChannelQuery = `
 SELECT last_message_id
 FROM channel_state

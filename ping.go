@@ -2,7 +2,6 @@
 package main
 
 import (
-	"log"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -28,7 +27,7 @@ func recordUserPings(
 		seen[u.ID] = struct{}{}
 
 		if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, guildID, u, occurredAt); err != nil {
-			log.Printf("mentioned-user upsert failed (author=%s): %v", u.ID, err)
+			logDBErr("mentioned-user upsert failed (author=%s): %v", u.ID, err)
 		}
 
 		if _, err := stmts.upsertPingEvent.Exec(
@@ -40,7 +39,7 @@ func recordUserPings(
 			strings.TrimSpace(u.Username),
 			occurredAt,
 		); err != nil {
-			log.Printf("ping event upsert failed (msg=%s actor=%s target=%s): %v", messageID, actorID, u.ID, err)
+			logDBErr("ping event upsert failed (msg=%s actor=%s target=%s): %v", messageID, actorID, u.ID, err)
 			continue
 		}
 
@@ -61,7 +60,7 @@ func recordUserPings(
 			occurredAt,
 			payload,
 		); err != nil {
-			log.Printf("event insert failed (type=%s msg=%s actor=%s target=%s): %v", eventUserPinged, messageID, actorID, u.ID, err)
+			logDBErr("event insert failed (type=%s msg=%s actor=%s target=%s): %v", eventUserPinged, messageID, actorID, u.ID, err)
 			continue
 		}
 		logTrackedEvent(eventUserPinged, guildID, channelID, messageID, actorID, payload)
@@ -95,7 +94,7 @@ func recordRolePings(
 		}
 
 		if err := upsertRoleName(stmts.upsertRole, stmts.upsertIDNameMapping, guildID, roleID, roleName, occurredAt); err != nil {
-			log.Printf("mentioned-role upsert failed (role=%s): %v", roleID, err)
+			logDBErr("mentioned-role upsert failed (role=%s): %v", roleID, err)
 		}
 
 		if _, err := stmts.upsertRolePingEvent.Exec(
@@ -107,7 +106,7 @@ func recordRolePings(
 			roleName,
 			occurredAt,
 		); err != nil {
-			log.Printf("role ping event upsert failed (msg=%s actor=%s role=%s): %v", messageID, actorID, roleID, err)
+			logDBErr("role ping event upsert failed (msg=%s actor=%s role=%s): %v", messageID, actorID, roleID, err)
 			continue
 		}
 
@@ -125,7 +124,7 @@ func recordRolePings(
 			occurredAt,
 			payload,
 		); err != nil {
-			log.Printf("event insert failed (type=%s msg=%s actor=%s role=%s): %v", eventRolePinged, messageID, actorID, roleID, err)
+			logDBErr("event insert failed (type=%s msg=%s actor=%s role=%s): %v", eventRolePinged, messageID, actorID, roleID, err)
 			continue
 		}
 		logTrackedEvent(eventRolePinged, guildID, channelID, messageID, actorID, payload)
