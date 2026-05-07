@@ -199,7 +199,7 @@ func TestHandleMessageUpdate_DedupesIdenticalPayload(t *testing.T) {
 	}
 }
 
-func TestHandleMessageUpdate_LogsModifiedMessageLikeSentMessage(t *testing.T) {
+func TestHandleMessageUpdate_LogsModifiedMessageOldAndNewWhenCached(t *testing.T) {
 	db, stmts := openTestDB(t)
 
 	t.Cleanup(func() {
@@ -251,8 +251,56 @@ func TestHandleMessageUpdate_LogsModifiedMessageLikeSentMessage(t *testing.T) {
 	}
 	if !strings.Contains(out, "User: alice\n") ||
 		!strings.Contains(out, "Channel: #channel-1\n") ||
-		!strings.Contains(out, "Message: after edit\n") {
-		t.Fatalf("modified message log did not match sent-message shape, got %q", out)
+		!strings.Contains(out, "Old Message: before edit\n") ||
+		!strings.Contains(out, "New Message: after edit\n") {
+		t.Fatalf("modified message log did not include old and new content, got %q", out)
+	}
+}
+
+func TestHandleMessageUpdate_LogsModifiedMessageOldAndNewFromStoredMessage(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	created := time.Date(2026, 3, 3, 15, 4, 5, 0, time.UTC)
+	handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "1008",
+			GuildID:   "guild-1",
+			ChannelID: "channel-1",
+			Content:   "test1",
+			Timestamp: created,
+			Author: &discordgo.User{
+				ID:       "user-1",
+				Username: "alice",
+			},
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	edited := created.Add(2 * time.Minute)
+	out := captureStdout(t, func() {
+		handleMessageUpdate(nil, db, stmts, &discordgo.MessageUpdate{
+			Message: &discordgo.Message{
+				ID:              "1008",
+				GuildID:         "guild-1",
+				ChannelID:       "channel-1",
+				Content:         "test2",
+				EditedTimestamp: &edited,
+				Author: &discordgo.User{
+					ID:       "user-1",
+					Username: "alice",
+				},
+			},
+		})
+	})
+
+	if !strings.Contains(out, "Old Message: test1\n") ||
+		!strings.Contains(out, "New Message: test2\n") {
+		t.Fatalf("modified message log did not include stored old content, got %q", out)
 	}
 }
 

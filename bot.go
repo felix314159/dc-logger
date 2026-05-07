@@ -981,6 +981,8 @@ func handleMessageUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		logDBErr("channel upsert failed (channel=%s): %v", m.ChannelID, err)
 	}
 
+	oldContent, hasOldContent := messageUpdateOldContent(db, m)
+
 	editedAt := ""
 	if m.EditedTimestamp != nil && !m.EditedTimestamp.IsZero() {
 		editedAt = m.EditedTimestamp.UTC().Format(time.RFC3339Nano)
@@ -994,8 +996,8 @@ func handleMessageUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		"edited_at":         editedAt,
 		"had_cached_before": m.BeforeUpdate != nil,
 	}
-	if m.BeforeUpdate != nil {
-		payload["before_content"] = m.BeforeUpdate.Content
+	if hasOldContent {
+		payload["before_content"] = oldContent
 	}
 
 	inserted, err := insertMessageUpdatedLifecycleEventDedup(
@@ -1032,7 +1034,33 @@ func handleMessageUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	if loggedAt == "" {
 		loggedAt = now
 	}
-	logMessageModifiedEvent(s, db, m.GuildID, m.ChannelID, m.ID, senderName, m.Content, loggedAt)
+	logMessageModifiedEvent(s, db, m.GuildID, m.ChannelID, m.ID, senderName, oldContent, m.Content, loggedAt, hasOldContent)
+}
+
+func messageUpdateOldContent(db *sql.DB, m *discordgo.MessageUpdate) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	if m.BeforeUpdate != nil {
+		return m.BeforeUpdate.Content, true
+	}
+	if db == nil || m.ID == "" {
+		return "", false
+	}
+
+	var content, editedAt sql.NullString
+	err := db.QueryRow(selectMessageContentEditedByIDQuery, m.ID).Scan(&content, &editedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false
+	}
+	if err != nil {
+		logDBErr("message content lookup failed (msg=%s): %v", m.ID, err)
+		return "", false
+	}
+	if !content.Valid {
+		return "", false
+	}
+	return content.String, true
 }
 
 func insertMessageSentLifecycleEventDedup(
@@ -1883,21 +1911,24 @@ func logMessageSentEvent(
 	db *sql.DB,
 	guildID, channelID, messageID, senderName, content, createdAt string,
 ) {
-	logMessageEvent(s, db, "message_sent", guildID, channelID, messageID, senderName, content, createdAt)
+	logMessageEvent(s, db, "message_sent", guildID, channelID, messageID, senderName, content, createdAt, "", false)
 }
 
 func logMessageModifiedEvent(
 	s *discordgo.Session,
 	db *sql.DB,
-	guildID, channelID, messageID, senderName, content, modifiedAt string,
+	guildID, channelID, messageID, senderName, oldContent, newContent, modifiedAt string,
+	hasOldContent bool,
 ) {
-	logMessageEvent(s, db, "message_modified", guildID, channelID, messageID, senderName, content, modifiedAt)
+	logMessageEvent(s, db, "message_modified", guildID, channelID, messageID, senderName, newContent, modifiedAt, oldContent, hasOldContent)
 }
 
 func logMessageEvent(
 	s *discordgo.Session,
 	db *sql.DB,
 	eventType, guildID, channelID, messageID, senderName, content, eventAt string,
+	oldContent string,
+	hasOldContent bool,
 ) {
 	if !trackedEventLoggingEnabled.Load() {
 		return
@@ -1920,6 +1951,9 @@ func logMessageEvent(
 	}
 
 	content = replaceMentionsWithDisplayNames(s, db, guildID, content)
+	if hasOldContent {
+		oldContent = replaceMentionsWithDisplayNames(s, db, guildID, oldContent)
+	}
 	eventTime := formatMessageSentTime(eventAt, messageID)
 	logText := renderMessageEventLog(
 		eventType,
@@ -1928,6 +1962,8 @@ func logMessageEvent(
 		channelName,
 		content,
 		eventTime,
+		oldContent,
+		hasOldContent,
 	)
 
 	liveMessageLogPrintMu.Lock()
@@ -1942,13 +1978,24 @@ func logMessageEvent(
 }
 
 func renderMessageSentEventLog(senderName, threadName, channelName, content, eventTime string) string {
-	return renderMessageEventLog("message_sent", senderName, threadName, channelName, content, eventTime)
+	return renderMessageEventLog("message_sent", senderName, threadName, channelName, content, eventTime, "", false)
 }
 
-func renderMessageEventLog(eventType, senderName, threadName, channelName, content, eventTime string) string {
+func renderMessageEventLog(eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool) string {
 	locationLines := fmt.Sprintf("Channel: %s\n", channelName)
 	if strings.TrimSpace(threadName) != "" {
 		locationLines = fmt.Sprintf("Thread: %s\nChannel: %s\n", threadName, channelName)
+	}
+	if hasOldContent {
+		return fmt.Sprintf(
+			"Event: %s\nUser: %s\n%sOld Message: %s\nNew Message: %s\nTime: %s\n\n",
+			eventType,
+			senderName,
+			locationLines,
+			oldContent,
+			content,
+			eventTime,
+		)
 	}
 	return fmt.Sprintf(
 		"Event: %s\nUser: %s\n%sMessage: %s\nTime: %s\n\n",
