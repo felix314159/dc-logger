@@ -1,4 +1,5 @@
 # Local SQLite artifacts
+/database/
 *.db
 *.db-shm
 *.db-wal
@@ -9,6 +10,14 @@
 .env
 .env.*
 !.env.example
+[sS][eE][cC][rR][eE][tT].[mM][dD]
+[sS][eE][cC][rR][eE][tT][sS].[mM][dD]
+[sS][eE][cC][rR][eE][tT].[tT][xX][tT]
+[sS][eE][cC][rR][eE][tT][sS].[tT][xX][tT]
+
+# Local agent workspaces
+/.claude/
+/.codex/
 
 # Local build artifacts
 /dc-logger
