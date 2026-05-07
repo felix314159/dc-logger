@@ -764,6 +764,12 @@ FROM messages
 WHERE message_id = ?;
 `
 
+const selectUserDisplayFieldsByIDQuery = `
+SELECT global_name, username
+FROM users
+WHERE author_id = ?;
+`
+
 const selectAttachmentLogFieldsByMessageIDQuery = `
 SELECT content_text, filename
 FROM attachments

@@ -774,6 +774,46 @@ func TestHandleMessageDelete_LogsDeletedMessageContentFromCache(t *testing.T) {
 	}
 }
 
+func TestHandleMessageDelete_LogsDeletedMessageMemberDisplayNameFromCache(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	out := captureStdout(t, func() {
+		handleMessageDelete(nil, db, stmts, &discordgo.MessageDelete{
+			Message: &discordgo.Message{
+				ID:        "5004",
+				GuildID:   "guild-5",
+				ChannelID: "channel-5",
+			},
+			BeforeDelete: &discordgo.Message{
+				Content: "deleted text",
+				Author: &discordgo.User{
+					ID:         "user-5",
+					Username:   "full_username",
+					GlobalName: "Shown Name",
+				},
+				Member: &discordgo.Member{
+					Nick: "Server Nick",
+					User: &discordgo.User{
+						ID:         "user-5",
+						Username:   "full_username",
+						GlobalName: "Shown Name",
+					},
+				},
+			},
+		})
+	})
+
+	if !strings.Contains(out, "User: Server Nick\n") {
+		t.Fatalf("deleted message log did not use member display name, got %q", out)
+	}
+}
+
 func TestHandleMessageDelete_LogsDeletedMessageContentFromStoredMessage(t *testing.T) {
 	db, stmts := openTestDB(t)
 
@@ -791,8 +831,9 @@ func TestHandleMessageDelete_LogsDeletedMessageContentFromStoredMessage(t *testi
 			Content:   "stored before delete",
 			Timestamp: time.Now().UTC(),
 			Author: &discordgo.User{
-				ID:       "user-5",
-				Username: "dolor",
+				ID:         "user-5",
+				Username:   "full_username",
+				GlobalName: "Shown Name",
 			},
 		},
 	})
@@ -809,7 +850,7 @@ func TestHandleMessageDelete_LogsDeletedMessageContentFromStoredMessage(t *testi
 	})
 
 	if !strings.Contains(out, "Event: message_deleted\n") ||
-		!strings.Contains(out, "User: dolor\n") ||
+		!strings.Contains(out, "User: Shown Name\n") ||
 		!strings.Contains(out, "Message: stored before delete\n") {
 		t.Fatalf("deleted message log did not include stored message details, got %q", out)
 	}

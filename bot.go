@@ -847,7 +847,7 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	senderName := ""
 	if m.Author != nil {
 		authorID = m.Author.ID
-		senderName = messageAuthorDisplayName(m.Author)
+		senderName = messageDisplayName(m.Message)
 		if err := upsertGuildMemberRow(stmts.upsertGuildMember, m.GuildID, authorID, now); err != nil {
 			logDBErr("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, authorID, err)
 		}
@@ -971,7 +971,7 @@ func handleMessageUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	senderName := ""
 	if m.Author != nil {
 		authorID = m.Author.ID
-		senderName = messageAuthorDisplayName(m.Author)
+		senderName = messageDisplayName(m.Message)
 		if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, m.GuildID, m.Author, now); err != nil {
 			logDBErr("user upsert failed (author=%s): %v", m.Author.ID, err)
 		}
@@ -1201,7 +1201,7 @@ func messageDeleteLogFields(db *sql.DB, m *discordgo.MessageDelete) (content, au
 		content = m.BeforeDelete.Content
 		if m.BeforeDelete.Author != nil {
 			authorID = m.BeforeDelete.Author.ID
-			senderName = messageAuthorDisplayName(m.BeforeDelete.Author)
+			senderName = messageDisplayName(m.BeforeDelete)
 		}
 	}
 	if m.Message != nil && m.Message.Author != nil {
@@ -1209,7 +1209,7 @@ func messageDeleteLogFields(db *sql.DB, m *discordgo.MessageDelete) (content, au
 			authorID = m.Message.Author.ID
 		}
 		if senderName == "" {
-			senderName = messageAuthorDisplayName(m.Message.Author)
+			senderName = messageDisplayName(m.Message)
 		}
 	}
 
@@ -1231,7 +1231,7 @@ func messageDeleteLogFields(db *sql.DB, m *discordgo.MessageDelete) (content, au
 		content = messageDeleteAttachmentLogContent(db, m.ID)
 	}
 	if senderName == "" && authorID != "" && m.Message != nil {
-		senderName = currentMappedName(db, nameMappingEntityUser, authorID, m.GuildID)
+		senderName = currentUserDisplayName(db, authorID, m.GuildID)
 	}
 	return content, authorID, senderName
 }
@@ -2123,6 +2123,50 @@ func messageAuthorDisplayName(author *discordgo.User) string {
 		return n
 	}
 	return strings.TrimSpace(author.ID)
+}
+
+func messageDisplayName(m *discordgo.Message) string {
+	if m == nil {
+		return ""
+	}
+	if m.Member != nil {
+		if n := strings.TrimSpace(m.Member.Nick); n != "" {
+			return n
+		}
+		if n := messageAuthorDisplayName(m.Member.User); n != "" {
+			return n
+		}
+	}
+	return messageAuthorDisplayName(m.Author)
+}
+
+func currentUserDisplayName(db *sql.DB, userID, guildID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return ""
+	}
+	if db != nil {
+		var globalName, username sql.NullString
+		err := db.QueryRow(selectUserDisplayFieldsByIDQuery, userID).Scan(&globalName, &username)
+		if err == nil {
+			if globalName.Valid {
+				if n := strings.TrimSpace(globalName.String); n != "" {
+					return n
+				}
+			}
+			if username.Valid {
+				if n := strings.TrimSpace(username.String); n != "" {
+					return n
+				}
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			logDBErr("user display lookup failed (user=%s): %v", userID, err)
+		}
+	}
+	if mapped := currentMappedName(db, nameMappingEntityUser, userID, guildID); mapped != "" {
+		return mapped
+	}
+	return userID
 }
 
 func replaceMentionsWithDisplayNames(s *discordgo.Session, db *sql.DB, guildID, content string) string {
