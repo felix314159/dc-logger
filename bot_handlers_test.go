@@ -323,6 +323,33 @@ func TestHandleMessageCreate_EmptyContentSkipsPersistenceButAdvancesState(t *tes
 	}
 }
 
+func TestHandleMessageCreate_DedupesReplayedMessageCreate(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	msg := &discordgo.Message{
+		ID:        "2401",
+		GuildID:   "guild-24",
+		ChannelID: "channel-24",
+		Content:   "replayed after reconnect",
+		Timestamp: time.Now().UTC(),
+		Author: &discordgo.User{
+			ID:            "user-24",
+			Username:      "replay-user",
+			Discriminator: "0024",
+		},
+	}
+
+	handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{Message: msg})
+	handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{Message: msg})
+
+	if got := mustCount(t, db, countMessagesByMessageIDQuery, "2401"); got != 1 {
+		t.Fatalf("expected one message row after replayed create, got %d", got)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "2401", string(eventMessageSent)); got != 1 {
+		t.Fatalf("expected one message_sent lifecycle row after replayed create, got %d", got)
+	}
+}
+
 func TestHandleMessageCreate_AttachmentOnlyMessagePersists(t *testing.T) {
 	db, stmts := openTestDB(t)
 	prevFetcher := attachmentTextFetcher

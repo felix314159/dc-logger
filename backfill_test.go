@@ -633,12 +633,50 @@ func TestPersistBackfillMessage_DedupesMessageSentLifecycleEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second persistBackfillMessage failed: %v", err)
 	}
-	if !inserted {
-		t.Fatal("expected second insert to report inserted=true")
+	if inserted {
+		t.Fatal("expected duplicate backfill to report inserted=false")
+	}
+
+	if got := mustCount(t, db, countMessagesByMessageIDQuery, "8101"); got != 1 {
+		t.Fatalf("expected one message row after duplicate backfill, got %d", got)
 	}
 
 	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "8101", string(eventMessageSent)); got != 1 {
 		t.Fatalf("expected one message_sent lifecycle row after duplicate backfill, got %d", got)
+	}
+}
+
+func TestPersistBackfillMessage_DedupesAfterLiveReplay(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	msg := &discordgo.Message{
+		ID:        "8102",
+		GuildID:   "guild-dedupe",
+		ChannelID: "channel-dedupe",
+		Content:   "already live",
+		Timestamp: time.Now().UTC(),
+		Author: &discordgo.User{
+			ID:            "user-dedupe",
+			Username:      "dedupe-user",
+			Discriminator: "0812",
+		},
+	}
+
+	handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{Message: msg})
+
+	inserted, err := persistBackfillMessage(db, stmts, nil, "guild-dedupe", "channel-dedupe", "", msg)
+	if err != nil {
+		t.Fatalf("persistBackfillMessage after live replay failed: %v", err)
+	}
+	if inserted {
+		t.Fatal("expected backfill of already-live message to report inserted=false")
+	}
+
+	if got := mustCount(t, db, countMessagesByMessageIDQuery, "8102"); got != 1 {
+		t.Fatalf("expected one message row after live/backfill overlap, got %d", got)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "8102", string(eventMessageSent)); got != 1 {
+		t.Fatalf("expected one message_sent lifecycle row after live/backfill overlap, got %d", got)
 	}
 }
 

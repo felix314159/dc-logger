@@ -9,4 +9,4 @@ Use of this software is entirely at your own risk. The authors and contributors 
 
 ## Warning
 
-Entirely vibe-coded by Codex 5.3 Thinking, I did not write a single line of code. It seems to work well tho, lgtm LFG
+Entirely vibe-coded by Codex 5.3 and 5.5 Thinking, I did not write a single line of code. It seems to work well tho, lgtm LFG

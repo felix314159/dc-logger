@@ -675,8 +675,9 @@ func persistBackfillMessage(
 	if err := upsertGuildMemberRow(stmts.upsertGuildMember, guildID, m.Author.ID, createdAt); err != nil {
 		logDBErr("backfill guild member upsert failed (author=%s): %v", m.Author.ID, err)
 	}
+	messageInserted := false
 	if m.Content != "" {
-		if _, err := stmts.insertMsg.Exec(
+		res, err := stmts.insertMsg.Exec(
 			m.ID,
 			guildID,
 			channelID,
@@ -688,9 +689,15 @@ func persistBackfillMessage(
 			rel.referencedGuildID,
 			rel.threadID,
 			rel.threadParentID,
-		); err != nil {
+		)
+		if err != nil {
 			return false, fmt.Errorf("insert msg=%s: %w", m.ID, err)
 		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("read insert result for msg=%s: %w", m.ID, err)
+		}
+		messageInserted = rows > 0
 	}
 	if len(m.Attachments) > 0 {
 		_, _ = upsertMessageAttachments(
@@ -707,39 +714,25 @@ func persistBackfillMessage(
 	}
 	recordUserPings(stmts, guildID, channelID, m.ID, m.Author.ID, createdAt, m.Mentions)
 	recordRolePings(stmts, s, guildID, channelID, m.ID, m.Author.ID, createdAt, m.MentionRoles)
-	shouldRecordMessageSent := true
-	if db != nil {
-		var count int
-		if err := db.QueryRow(
-			countLifecycleByMessageAndTypeQuery,
-			m.ID,
-			string(eventMessageSent),
-		).Scan(&count); err != nil {
-			return false, fmt.Errorf("query lifecycle count for msg=%s: %w", m.ID, err)
-		}
-		shouldRecordMessageSent = count == 0
-	}
-	if shouldRecordMessageSent {
-		if err := recordLifecycleEvent(
-			stmts.insertEvent,
-			eventMessageSent,
-			guildID,
-			channelID,
-			m.ID,
-			m.Author.ID,
-			createdAt,
-			map[string]any{
-				"content":           m.Content,
-				"attachments_count": len(m.Attachments),
-				"embeds_count":      len(m.Embeds),
-				"backfilled":        true,
-			},
-		); err != nil {
-			return false, fmt.Errorf("insert lifecycle event for msg=%s: %w", m.ID, err)
-		}
+	eventInserted, err := insertMessageSentLifecycleEventDedup(
+		stmts.insertMessageSentEventDedup,
+		guildID,
+		channelID,
+		m.ID,
+		m.Author.ID,
+		createdAt,
+		map[string]any{
+			"content":           m.Content,
+			"attachments_count": len(m.Attachments),
+			"embeds_count":      len(m.Embeds),
+			"backfilled":        true,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("insert lifecycle event for msg=%s: %w", m.ID, err)
 	}
 
-	return true, nil
+	return messageInserted || eventInserted, nil
 }
 
 func fetchActiveThreads(s *discordgo.Session, guildID string, run *backfillRun) ([]*discordgo.Channel, error) {
