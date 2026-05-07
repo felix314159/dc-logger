@@ -4,8 +4,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +48,32 @@ func mustCount(t *testing.T, db *sql.DB, query string, args ...any) int {
 	return n
 }
 
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = oldStdout
+		_ = r.Close()
+	}()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdout pipe writer failed: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout pipe failed: %v", err)
+	}
+	return string(out)
+}
+
 func testAuditEntryIDForNow() string {
 	nowMS := time.Now().UTC().UnixMilli()
 	raw := uint64((nowMS - discordSnowflakeEpochMS) << 22)
@@ -71,7 +100,7 @@ func TestHandleMessageUpdate_PersistsLatestContentAndLifecycleHistory(t *testing
 	})
 
 	edited := created.Add(2 * time.Minute)
-	handleMessageUpdate(nil, stmts, &discordgo.MessageUpdate{
+	handleMessageUpdate(nil, db, stmts, &discordgo.MessageUpdate{
 		Message: &discordgo.Message{
 			ID:              "1001",
 			GuildID:         "guild-1",
@@ -162,11 +191,67 @@ func TestHandleMessageUpdate_DedupesIdenticalPayload(t *testing.T) {
 		},
 	}
 
-	handleMessageUpdate(nil, stmts, update)
-	handleMessageUpdate(nil, stmts, update)
+	handleMessageUpdate(nil, db, stmts, update)
+	handleMessageUpdate(nil, db, stmts, update)
 
 	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "1002", string(eventMessageUpdated)); got != 1 {
 		t.Fatalf("expected deduped message_updated lifecycle event count=1, got %d", got)
+	}
+}
+
+func TestHandleMessageUpdate_LogsModifiedMessageLikeSentMessage(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+	})
+
+	created := time.Date(2026, 3, 3, 15, 4, 5, 0, time.UTC)
+	handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "1003",
+			GuildID:   "guild-1",
+			ChannelID: "channel-1",
+			Content:   "before edit",
+			Timestamp: created,
+			Author: &discordgo.User{
+				ID:       "user-1",
+				Username: "alice",
+			},
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	edited := created.Add(2 * time.Minute)
+	out := captureStdout(t, func() {
+		handleMessageUpdate(nil, db, stmts, &discordgo.MessageUpdate{
+			Message: &discordgo.Message{
+				ID:              "1003",
+				GuildID:         "guild-1",
+				ChannelID:       "channel-1",
+				Content:         "after edit",
+				EditedTimestamp: &edited,
+				Author: &discordgo.User{
+					ID:       "user-1",
+					Username: "alice",
+				},
+			},
+			BeforeUpdate: &discordgo.Message{
+				Content: "before edit",
+				Author: &discordgo.User{
+					ID: "user-1",
+				},
+			},
+		})
+	})
+
+	if !strings.Contains(out, "Event: message_modified\n") {
+		t.Fatalf("expected message_modified event in log, got %q", out)
+	}
+	if !strings.Contains(out, "User: alice\n") ||
+		!strings.Contains(out, "Channel: #channel-1\n") ||
+		!strings.Contains(out, "Message: after edit\n") {
+		t.Fatalf("modified message log did not match sent-message shape, got %q", out)
 	}
 }
 
@@ -432,7 +517,7 @@ func TestHandleMessageUpdateAndDelete_IgnoreBots(t *testing.T) {
 	}
 
 	edited := time.Now().UTC()
-	handleMessageUpdate(nil, stmts, &discordgo.MessageUpdate{
+	handleMessageUpdate(nil, db, stmts, &discordgo.MessageUpdate{
 		Message: &discordgo.Message{
 			ID:              "4001",
 			GuildID:         "guild-4",

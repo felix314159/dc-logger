@@ -691,7 +691,7 @@ func registerHandlers(
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
 			return
 		}
-		handleMessageUpdate(s, stmts, m)
+		handleMessageUpdate(s, db, stmts, m)
 	})
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageDelete) {
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
@@ -838,14 +838,7 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	senderName := ""
 	if m.Author != nil {
 		authorID = m.Author.ID
-		if n := strings.TrimSpace(m.Author.GlobalName); n != "" {
-			senderName = n
-		} else if n := strings.TrimSpace(m.Author.Username); n != "" {
-			senderName = n
-		}
-		if senderName == "" {
-			senderName = authorID
-		}
+		senderName = messageAuthorDisplayName(m.Author)
 		if err := upsertGuildMemberRow(stmts.upsertGuildMember, m.GuildID, authorID, now); err != nil {
 			logDBErr("guild member upsert failed (guild=%s user=%s): %v", m.GuildID, authorID, err)
 		}
@@ -949,7 +942,7 @@ func logSkippedMessageCreate(m *discordgo.MessageCreate, reason string) {
 	)
 }
 
-func handleMessageUpdate(s *discordgo.Session, stmts *preparedStatements, m *discordgo.MessageUpdate) {
+func handleMessageUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, m *discordgo.MessageUpdate) {
 	if m == nil || m.Message == nil || m.GuildID == "" {
 		return
 	}
@@ -966,8 +959,10 @@ func handleMessageUpdate(s *discordgo.Session, stmts *preparedStatements, m *dis
 		logDBErr("guild name mapping upsert failed (guild=%s): %v", m.GuildID, err)
 	}
 	authorID := ""
+	senderName := ""
 	if m.Author != nil {
 		authorID = m.Author.ID
+		senderName = messageAuthorDisplayName(m.Author)
 		if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, m.GuildID, m.Author, now); err != nil {
 			logDBErr("user upsert failed (author=%s): %v", m.Author.ID, err)
 		}
@@ -1021,6 +1016,14 @@ func handleMessageUpdate(s *discordgo.Session, stmts *preparedStatements, m *dis
 		authorID,
 		payload,
 	)
+	if senderName == "" {
+		senderName = authorID
+	}
+	loggedAt := editedAt
+	if loggedAt == "" {
+		loggedAt = now
+	}
+	logMessageModifiedEvent(s, db, m.GuildID, m.ChannelID, m.ID, senderName, m.Content, loggedAt)
 }
 
 func insertMessageSentLifecycleEventDedup(
@@ -1871,6 +1874,22 @@ func logMessageSentEvent(
 	db *sql.DB,
 	guildID, channelID, messageID, senderName, content, createdAt string,
 ) {
+	logMessageEvent(s, db, "message_sent", guildID, channelID, messageID, senderName, content, createdAt)
+}
+
+func logMessageModifiedEvent(
+	s *discordgo.Session,
+	db *sql.DB,
+	guildID, channelID, messageID, senderName, content, modifiedAt string,
+) {
+	logMessageEvent(s, db, "message_modified", guildID, channelID, messageID, senderName, content, modifiedAt)
+}
+
+func logMessageEvent(
+	s *discordgo.Session,
+	db *sql.DB,
+	eventType, guildID, channelID, messageID, senderName, content, eventAt string,
+) {
 	if !trackedEventLoggingEnabled.Load() {
 		return
 	}
@@ -1892,8 +1911,9 @@ func logMessageSentEvent(
 	}
 
 	content = replaceMentionsWithDisplayNames(s, db, guildID, content)
-	eventTime := formatMessageSentTime(createdAt, messageID)
-	fmt.Print(renderMessageSentEventLog(
+	eventTime := formatMessageSentTime(eventAt, messageID)
+	fmt.Print(renderMessageEventLog(
+		eventType,
 		senderName,
 		threadName,
 		channelName,
@@ -1903,12 +1923,17 @@ func logMessageSentEvent(
 }
 
 func renderMessageSentEventLog(senderName, threadName, channelName, content, eventTime string) string {
+	return renderMessageEventLog("message_sent", senderName, threadName, channelName, content, eventTime)
+}
+
+func renderMessageEventLog(eventType, senderName, threadName, channelName, content, eventTime string) string {
 	locationLines := fmt.Sprintf("Channel: %s\n", channelName)
 	if strings.TrimSpace(threadName) != "" {
 		locationLines = fmt.Sprintf("Thread: %s\nChannel: %s\n", threadName, channelName)
 	}
 	return fmt.Sprintf(
-		"Event: message_sent\nUser: %s\n%sMessage: %s\nTime: %s\n\n",
+		"Event: %s\nUser: %s\n%sMessage: %s\nTime: %s\n\n",
+		eventType,
 		senderName,
 		locationLines,
 		content,
@@ -1924,6 +1949,19 @@ func messageSentLogContent(content, attachmentLogContent string) string {
 		return attachmentLogContent
 	}
 	return content
+}
+
+func messageAuthorDisplayName(author *discordgo.User) string {
+	if author == nil {
+		return ""
+	}
+	if n := strings.TrimSpace(author.GlobalName); n != "" {
+		return n
+	}
+	if n := strings.TrimSpace(author.Username); n != "" {
+		return n
+	}
+	return strings.TrimSpace(author.ID)
 }
 
 func replaceMentionsWithDisplayNames(s *discordgo.Session, db *sql.DB, guildID, content string) string {
