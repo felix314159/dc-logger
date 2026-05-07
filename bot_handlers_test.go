@@ -825,7 +825,7 @@ func TestHandleMessageDelete_LogsDeletedMessageContentFromCache(t *testing.T) {
 	if !strings.Contains(out, "Event: message_deleted\n") ||
 		!strings.Contains(out, "User: dolor\n") ||
 		!strings.Contains(out, "Channel: #channel-5\n") ||
-		!strings.Contains(out, "Message: deleted text\n") {
+		!strings.Contains(out, "Message: "+ansiLightRed+"deleted text"+ansiReset+"\n") {
 		t.Fatalf("deleted message log did not include cached message details, got %q", out)
 	}
 }
@@ -907,7 +907,7 @@ func TestHandleMessageDelete_LogsDeletedMessageContentFromStoredMessage(t *testi
 
 	if !strings.Contains(out, "Event: message_deleted\n") ||
 		!strings.Contains(out, "User: Shown Name\n") ||
-		!strings.Contains(out, "Message: stored before delete\n") {
+		!strings.Contains(out, "Message: "+ansiLightRed+"stored before delete"+ansiReset+"\n") {
 		t.Fatalf("deleted message log did not include stored message details, got %q", out)
 	}
 }

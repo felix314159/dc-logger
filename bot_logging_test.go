@@ -104,6 +104,29 @@ func TestRenderMessageModifiedEventLog_ColorsOldAndNewContent(t *testing.T) {
 	}
 }
 
+func TestRenderMessageDeletedEventLog_ColorsMessageContent(t *testing.T) {
+	got := renderMessageEventLog(
+		"message_deleted",
+		"ipsum",
+		"",
+		"#forum-lorem",
+		"removed text",
+		"2026-03-02, 04:28:15 PM",
+		"",
+		false,
+	)
+
+	want := "" +
+		"Event: message_deleted\n" +
+		"User: ipsum\n" +
+		"Channel: #forum-lorem\n" +
+		"Message: " + ansiLightRed + "removed text" + ansiReset + "\n" +
+		"Time: 2026-03-02, 04:28:15 PM\n\n"
+	if got != want {
+		t.Fatalf("formatted message_deleted log mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
 func TestReplaceMentionsWithDisplayNames(t *testing.T) {
 	got := replaceMentionsWithDisplayNames(
 		nil,

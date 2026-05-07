@@ -2099,6 +2099,9 @@ func renderMessageEventLog(eventType, senderName, threadName, channelName, conte
 			eventTime,
 		)
 	}
+	if eventType == "message_deleted" {
+		content = colorizeTerminalText(content, ansiLightRed)
+	}
 	return fmt.Sprintf(
 		"Event: %s\nUser: %s\n%sMessage: %s\nTime: %s\n\n",
 		eventType,
