@@ -80,6 +80,30 @@ func TestRenderMessageSentEventLog_ThreadFormatting(t *testing.T) {
 	}
 }
 
+func TestRenderMessageModifiedEventLog_ColorsOldAndNewContent(t *testing.T) {
+	got := renderMessageEventLog(
+		"message_modified",
+		"ipsum",
+		"",
+		"#forum-lorem",
+		"after edit",
+		"2026-03-02, 04:28:15 PM",
+		"before edit",
+		true,
+	)
+
+	want := "" +
+		"Event: message_modified\n" +
+		"User: ipsum\n" +
+		"Channel: #forum-lorem\n" +
+		"Old Message: " + ansiLightRed + "before edit" + ansiReset + "\n" +
+		"New Message: " + ansiGreen + "after edit" + ansiReset + "\n" +
+		"Time: 2026-03-02, 04:28:15 PM\n\n"
+	if got != want {
+		t.Fatalf("formatted message_modified log mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
 func TestReplaceMentionsWithDisplayNames(t *testing.T) {
 	got := replaceMentionsWithDisplayNames(
 		nil,

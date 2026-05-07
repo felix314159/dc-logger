@@ -307,8 +307,8 @@ func TestHandleMessageUpdate_LogsModifiedMessageOldAndNewWhenCached(t *testing.T
 	}
 	if !strings.Contains(out, "User: alice\n") ||
 		!strings.Contains(out, "Channel: #channel-1\n") ||
-		!strings.Contains(out, "Old Message: before edit\n") ||
-		!strings.Contains(out, "New Message: after edit\n") {
+		!strings.Contains(out, "Old Message: "+ansiLightRed+"before edit"+ansiReset+"\n") ||
+		!strings.Contains(out, "New Message: "+ansiGreen+"after edit"+ansiReset+"\n") {
 		t.Fatalf("modified message log did not include old and new content, got %q", out)
 	}
 }
@@ -354,8 +354,8 @@ func TestHandleMessageUpdate_LogsModifiedMessageOldAndNewFromStoredMessage(t *te
 		})
 	})
 
-	if !strings.Contains(out, "Old Message: test1\n") ||
-		!strings.Contains(out, "New Message: test2\n") {
+	if !strings.Contains(out, "Old Message: "+ansiLightRed+"test1"+ansiReset+"\n") ||
+		!strings.Contains(out, "New Message: "+ansiGreen+"test2"+ansiReset+"\n") {
 		t.Fatalf("modified message log did not include stored old content, got %q", out)
 	}
 }

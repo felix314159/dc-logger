@@ -27,6 +27,9 @@ const (
 	discordSnowflakeEpochMS = int64(1420070400000)
 	auditLogFreshnessWindow = 15 * time.Second
 	databaseFileMonitorTick = 250 * time.Millisecond
+	ansiLightRed            = "\x1b[91m"
+	ansiGreen               = "\x1b[32m"
+	ansiReset               = "\x1b[0m"
 )
 
 var trackedEventLoggingEnabled atomic.Bool
@@ -2082,6 +2085,10 @@ func renderMessageEventLog(eventType, senderName, threadName, channelName, conte
 		locationLines = fmt.Sprintf("Thread: %s\nChannel: %s\n", threadName, channelName)
 	}
 	if hasOldContent {
+		if eventType == "message_modified" {
+			oldContent = colorizeTerminalText(oldContent, ansiLightRed)
+			content = colorizeTerminalText(content, ansiGreen)
+		}
 		return fmt.Sprintf(
 			"Event: %s\nUser: %s\n%sOld Message: %s\nNew Message: %s\nTime: %s\n\n",
 			eventType,
@@ -2103,7 +2110,11 @@ func renderMessageEventLog(eventType, senderName, threadName, channelName, conte
 }
 
 func renderLiveMessageLogSeparator() string {
-	return "\x1b[90m" + strings.Repeat("-", 80) + "\x1b[0m\n\n"
+	return "\x1b[90m" + strings.Repeat("-", 80) + ansiReset + "\n\n"
+}
+
+func colorizeTerminalText(text, color string) string {
+	return color + text + ansiReset
 }
 
 func messageSentLogContent(content, attachmentLogContent string) string {
