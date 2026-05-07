@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"example.org/dc-logger/internal/config"
+	"example.org/dc-logger/internal/querysvc"
 
 	_ "modernc.org/sqlite"
 )
@@ -126,6 +128,44 @@ func TestRunSearchMessages_DefaultDBPathWhenFlagAndEnvUnset(t *testing.T) {
 	}
 	if out.Count != 3 {
 		t.Fatalf("unexpected count: got %d want 3", out.Count)
+	}
+}
+
+func TestPrintResponse_LocalizesTimestampFields(t *testing.T) {
+	prevLocal := time.Local
+	time.Local = time.FixedZone("TEST_LOCAL", 2*60*60)
+	t.Cleanup(func() { time.Local = prevLocal })
+
+	var stdout bytes.Buffer
+	err := printResponse(false, response{
+		Command: "server-activity-summary",
+		GuildID: "g1",
+		Count:   1,
+		Items: []querysvc.Record{
+			{
+				Day:         "2026-01-01",
+				CreatedAt:   "2026-01-01T00:00:03Z",
+				FirstSeenAt: "2026-01-01T00:00:01Z",
+				LastSeenAt:  "2026-01-01T00:00:04Z",
+			},
+		},
+	}, &stdout)
+	if err != nil {
+		t.Fatalf("printResponse failed: %v", err)
+	}
+
+	var out response
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v\nraw=%s", err, stdout.String())
+	}
+	if out.Items[0].CreatedAt != "2026-01-01T02:00:03+02:00" {
+		t.Fatalf("created_at was not localized: %+v", out.Items[0])
+	}
+	if out.Items[0].FirstSeenAt != "2026-01-01T02:00:01+02:00" || out.Items[0].LastSeenAt != "2026-01-01T02:00:04+02:00" {
+		t.Fatalf("summary timestamps were not localized: %+v", out.Items[0])
+	}
+	if out.Items[0].Day != "2026-01-01" {
+		t.Fatalf("day grouping should remain unchanged: %+v", out.Items[0])
 	}
 }
 

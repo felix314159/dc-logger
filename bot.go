@@ -2100,13 +2100,17 @@ func formatMessageSentTime(createdAt, messageID string) string {
 	createdAt = strings.TrimSpace(createdAt)
 	if createdAt != "" {
 		if ts, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
-			return ts.Local().Format("2006-01-02, 03:04:05 PM")
+			return formatLocalLogTime(ts)
 		}
 	}
 	if ts, ok := snowflakeTime(messageID); ok {
-		return ts.Local().Format("2006-01-02, 03:04:05 PM")
+		return formatLocalLogTime(ts)
 	}
-	return time.Now().Local().Format("2006-01-02, 03:04:05 PM")
+	return formatLocalLogTime(time.Now())
+}
+
+func formatLocalLogTime(ts time.Time) string {
+	return ts.Local().Format("2006-01-02, 03:04:05 PM -0700 MST")
 }
 
 func setTrackedEventLoggingEnabled(enabled bool) {

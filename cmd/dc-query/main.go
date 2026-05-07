@@ -1271,6 +1271,7 @@ func printResponse(pretty bool, v response, out io.Writer) error {
 	if v.Items == nil {
 		v.Items = []querysvc.Record{}
 	}
+	localizeResponseTimes(&v)
 	var (
 		b   []byte
 		err error
@@ -1285,6 +1286,29 @@ func printResponse(pretty bool, v response, out io.Writer) error {
 	}
 	_, err = fmt.Fprintln(out, string(b))
 	return err
+}
+
+func localizeResponseTimes(v *response) {
+	if v == nil {
+		return
+	}
+	for i := range v.Items {
+		v.Items[i].CreatedAt = localizeRFC3339(v.Items[i].CreatedAt)
+		v.Items[i].FirstSeenAt = localizeRFC3339(v.Items[i].FirstSeenAt)
+		v.Items[i].LastSeenAt = localizeRFC3339(v.Items[i].LastSeenAt)
+	}
+}
+
+func localizeRFC3339(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	ts, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return value
+	}
+	return ts.Local().Format(time.RFC3339Nano)
 }
 
 func writeError(stderr io.Writer, err error) int {
