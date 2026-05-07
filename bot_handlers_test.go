@@ -204,6 +204,7 @@ func TestHandleMessageUpdate_LogsModifiedMessageLikeSentMessage(t *testing.T) {
 
 	t.Cleanup(func() {
 		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
 	})
 
 	created := time.Date(2026, 3, 3, 15, 4, 5, 0, time.UTC)
@@ -252,6 +253,36 @@ func TestHandleMessageUpdate_LogsModifiedMessageLikeSentMessage(t *testing.T) {
 		!strings.Contains(out, "Channel: #channel-1\n") ||
 		!strings.Contains(out, "Message: after edit\n") {
 		t.Fatalf("modified message log did not match sent-message shape, got %q", out)
+	}
+}
+
+func TestLiveMessageLogSeparatorsStartAfterEnabled(t *testing.T) {
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	beforeEnabled := captureStdout(t, func() {
+		logMessageSentEvent(nil, nil, "guild-1", "channel-1", "1004", "alice", "first", "2026-03-03T15:04:05Z")
+		logMessageSentEvent(nil, nil, "guild-1", "channel-1", "1005", "alice", "second", "2026-03-03T15:05:05Z")
+	})
+	if strings.Contains(beforeEnabled, renderLiveMessageLogSeparator()) {
+		t.Fatalf("expected no separator before separator logging is enabled, got %q", beforeEnabled)
+	}
+
+	setLiveMessageLogSeparatorsEnabled(true)
+	afterEnabled := captureStdout(t, func() {
+		logMessageSentEvent(nil, nil, "guild-1", "channel-1", "1006", "alice", "third", "2026-03-03T15:06:05Z")
+		logMessageSentEvent(nil, nil, "guild-1", "channel-1", "1007", "alice", "fourth", "2026-03-03T15:07:05Z")
+	})
+	separator := renderLiveMessageLogSeparator()
+	if strings.HasPrefix(afterEnabled, separator) {
+		t.Fatalf("expected first live message after enabling separators to have no leading separator, got %q", afterEnabled)
+	}
+	if got := strings.Count(afterEnabled, separator); got != 1 {
+		t.Fatalf("expected exactly one separator between two live messages, got %d in %q", got, afterEnabled)
 	}
 }
 

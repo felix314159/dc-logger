@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -29,6 +30,12 @@ const (
 )
 
 var trackedEventLoggingEnabled atomic.Bool
+var liveMessageLogSeparatorsEnabled atomic.Bool
+
+var (
+	liveMessageLogPrintMu                       sync.Mutex
+	liveMessageLogPrintedSinceSeparatorsEnabled bool
+)
 
 var (
 	messageLogUserMentionPattern = regexp.MustCompile(`<@!?([^>\s]+)>`)
@@ -521,6 +528,7 @@ func registerHandlers(
 	syncEnabled.Store(false)
 	var activeBackfillMetrics atomic.Pointer[backfillMetrics]
 	setTrackedEventLoggingEnabled(false)
+	setLiveMessageLogSeparatorsEnabled(false)
 
 	dg.AddHandler(func(s *discordgo.Session, rl *discordgo.RateLimit) {
 		m := activeBackfillMetrics.Load()
@@ -670,6 +678,7 @@ func registerHandlers(
 			)
 			log.Println("startup complete! backfill finished; realtime logging remains active")
 			fmt.Println(strings.Repeat(string('-'), 158))
+			setLiveMessageLogSeparatorsEnabled(true)
 		}()
 	})
 
@@ -1912,14 +1921,24 @@ func logMessageEvent(
 
 	content = replaceMentionsWithDisplayNames(s, db, guildID, content)
 	eventTime := formatMessageSentTime(eventAt, messageID)
-	fmt.Print(renderMessageEventLog(
+	logText := renderMessageEventLog(
 		eventType,
 		senderName,
 		threadName,
 		channelName,
 		content,
 		eventTime,
-	))
+	)
+
+	liveMessageLogPrintMu.Lock()
+	defer liveMessageLogPrintMu.Unlock()
+	if liveMessageLogSeparatorsEnabled.Load() {
+		if liveMessageLogPrintedSinceSeparatorsEnabled {
+			fmt.Print(renderLiveMessageLogSeparator())
+		}
+		liveMessageLogPrintedSinceSeparatorsEnabled = true
+	}
+	fmt.Print(logText)
 }
 
 func renderMessageSentEventLog(senderName, threadName, channelName, content, eventTime string) string {
@@ -1939,6 +1958,10 @@ func renderMessageEventLog(eventType, senderName, threadName, channelName, conte
 		content,
 		eventTime,
 	)
+}
+
+func renderLiveMessageLogSeparator() string {
+	return "\x1b[90m" + strings.Repeat("-", 80) + "\x1b[0m\n"
 }
 
 func messageSentLogContent(content, attachmentLogContent string) string {
@@ -2153,6 +2176,14 @@ func formatLocalLogTime(ts time.Time) string {
 
 func setTrackedEventLoggingEnabled(enabled bool) {
 	trackedEventLoggingEnabled.Store(enabled)
+}
+
+func setLiveMessageLogSeparatorsEnabled(enabled bool) {
+	liveMessageLogPrintMu.Lock()
+	defer liveMessageLogPrintMu.Unlock()
+
+	liveMessageLogSeparatorsEnabled.Store(enabled)
+	liveMessageLogPrintedSinceSeparatorsEnabled = false
 }
 
 func notifyStartupFatal(startupFatal chan<- error, err error) {
