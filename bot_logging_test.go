@@ -191,7 +191,7 @@ func TestFormatMessageSentTime_UsesSystemLocalTime(t *testing.T) {
 	t.Cleanup(func() { time.Local = prevLocal })
 
 	got := formatMessageSentTime("2026-03-03T15:04:05Z", "")
-	want := "2026-03-03, 10:04:05 AM -0500 TEST_LOCAL"
+	want := "2026-03-03, 10:04:05 AM"
 	if got != want {
 		t.Fatalf("formatMessageSentTime local conversion mismatch: got %q want %q", got, want)
 	}

@@ -2171,7 +2171,7 @@ func formatMessageSentTime(createdAt, messageID string) string {
 }
 
 func formatLocalLogTime(ts time.Time) string {
-	return ts.Local().Format("2006-01-02, 03:04:05 PM -0700 MST")
+	return ts.Local().Format("2006-01-02, 03:04:05 PM")
 }
 
 func setTrackedEventLoggingEnabled(enabled bool) {
