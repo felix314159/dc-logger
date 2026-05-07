@@ -199,6 +199,62 @@ func TestHandleMessageUpdate_DedupesIdenticalPayload(t *testing.T) {
 	}
 }
 
+func TestHandleMessageUpdate_SkipsModifiedEventWhenContentUnchanged(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	created := time.Date(2026, 3, 3, 15, 4, 5, 0, time.UTC)
+	content := "https://example.test/resource"
+	handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "1009",
+			GuildID:   "guild-1",
+			ChannelID: "channel-1",
+			Content:   content,
+			Timestamp: created,
+			Author: &discordgo.User{
+				ID:       "user-1",
+				Username: "alice",
+			},
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	edited := created.Add(2 * time.Minute)
+	out := captureStdout(t, func() {
+		handleMessageUpdate(nil, db, stmts, &discordgo.MessageUpdate{
+			Message: &discordgo.Message{
+				ID:              "1009",
+				GuildID:         "guild-1",
+				ChannelID:       "channel-1",
+				Content:         content,
+				EditedTimestamp: &edited,
+				Author: &discordgo.User{
+					ID:       "user-1",
+					Username: "alice",
+				},
+			},
+			BeforeUpdate: &discordgo.Message{
+				Content: content,
+				Author: &discordgo.User{
+					ID: "user-1",
+				},
+			},
+		})
+	})
+
+	if strings.Contains(out, "Event: message_modified\n") {
+		t.Fatalf("expected unchanged content update not to log message_modified, got %q", out)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "1009", string(eventMessageUpdated)); got != 0 {
+		t.Fatalf("expected unchanged content update not to persist message_updated lifecycle event, got %d", got)
+	}
+}
+
 func TestHandleMessageUpdate_LogsModifiedMessageOldAndNewWhenCached(t *testing.T) {
 	db, stmts := openTestDB(t)
 

@@ -991,6 +991,10 @@ func handleMessageUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		}
 	}
 
+	if hasOldContent && m.Content == oldContent {
+		return
+	}
+
 	payload := map[string]any{
 		"content":           m.Content,
 		"edited_at":         editedAt,
