@@ -706,7 +706,7 @@ func registerHandlers(
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
 			return
 		}
-		handleMessageDelete(stmts, m)
+		handleMessageDelete(s, db, stmts, m)
 	})
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
 		if g == nil || !syncEnabled.Load() || !guildFilter.allows(g.ID) {
@@ -1132,7 +1132,7 @@ func insertMessageUpdatedLifecycleEventDedup(
 	return rows > 0, nil
 }
 
-func handleMessageDelete(stmts *preparedStatements, m *discordgo.MessageDelete) {
+func handleMessageDelete(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, m *discordgo.MessageDelete) {
 	if m == nil || m.Message == nil || m.GuildID == "" {
 		return
 	}
@@ -1144,6 +1144,8 @@ func handleMessageDelete(stmts *preparedStatements, m *discordgo.MessageDelete) 
 	}
 	deletedAt := time.Now().UTC().Format(time.RFC3339Nano)
 
+	content, authorID, senderName := messageDeleteLogFields(db, m)
+
 	if _, err := stmts.markMessageDeleted.Exec(deletedAt, m.ID); err != nil {
 		logDBErr("mark message deleted failed (msg=%s): %v", m.ID, err)
 	}
@@ -1151,14 +1153,15 @@ func handleMessageDelete(stmts *preparedStatements, m *discordgo.MessageDelete) 
 		logDBErr("mark attachments deleted failed (msg=%s): %v", m.ID, err)
 	}
 
-	actorID := ""
 	payload := map[string]any{
 		"had_cached_before": m.BeforeDelete != nil,
+	}
+	if content != "" {
+		payload["content"] = content
 	}
 	if m.BeforeDelete != nil {
 		payload["before_content"] = m.BeforeDelete.Content
 		if m.BeforeDelete.Author != nil {
-			actorID = m.BeforeDelete.Author.ID
 			payload["before_author_id"] = m.BeforeDelete.Author.ID
 		}
 	}
@@ -1169,7 +1172,7 @@ func handleMessageDelete(stmts *preparedStatements, m *discordgo.MessageDelete) 
 		m.GuildID,
 		m.ChannelID,
 		m.ID,
-		actorID,
+		authorID,
 		deletedAt,
 		payload,
 	); err != nil {
@@ -1181,9 +1184,89 @@ func handleMessageDelete(stmts *preparedStatements, m *discordgo.MessageDelete) 
 		m.GuildID,
 		m.ChannelID,
 		m.ID,
-		actorID,
+		authorID,
 		payload,
 	)
+	if senderName == "" {
+		senderName = authorID
+	}
+	logMessageDeletedEvent(s, db, m.GuildID, m.ChannelID, m.ID, senderName, content, deletedAt)
+}
+
+func messageDeleteLogFields(db *sql.DB, m *discordgo.MessageDelete) (content, authorID, senderName string) {
+	if m == nil {
+		return "", "", ""
+	}
+	if m.BeforeDelete != nil {
+		content = m.BeforeDelete.Content
+		if m.BeforeDelete.Author != nil {
+			authorID = m.BeforeDelete.Author.ID
+			senderName = messageAuthorDisplayName(m.BeforeDelete.Author)
+		}
+	}
+	if m.Message != nil && m.Message.Author != nil {
+		if authorID == "" {
+			authorID = m.Message.Author.ID
+		}
+		if senderName == "" {
+			senderName = messageAuthorDisplayName(m.Message.Author)
+		}
+	}
+
+	if db != nil && m.ID != "" && (content == "" || authorID == "") {
+		var dbContent, dbAuthorID sql.NullString
+		err := db.QueryRow(selectMessageDeleteLogFieldsByIDQuery, m.ID).Scan(&dbContent, &dbAuthorID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			logDBErr("message delete log lookup failed (msg=%s): %v", m.ID, err)
+		}
+		if content == "" && dbContent.Valid {
+			content = dbContent.String
+		}
+		if authorID == "" && dbAuthorID.Valid {
+			authorID = dbAuthorID.String
+		}
+	}
+
+	if db != nil && m.ID != "" && strings.TrimSpace(content) == "" {
+		content = messageDeleteAttachmentLogContent(db, m.ID)
+	}
+	if senderName == "" && authorID != "" && m.Message != nil {
+		senderName = currentMappedName(db, nameMappingEntityUser, authorID, m.GuildID)
+	}
+	return content, authorID, senderName
+}
+
+func messageDeleteAttachmentLogContent(db *sql.DB, messageID string) string {
+	rows, err := db.Query(selectAttachmentLogFieldsByMessageIDQuery, messageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	if err != nil {
+		logDBErr("message delete attachment lookup failed (msg=%s): %v", messageID, err)
+		return ""
+	}
+	defer rows.Close()
+
+	var parts []string
+	for rows.Next() {
+		var contentText, filename string
+		if err := rows.Scan(&contentText, &filename); err != nil {
+			logDBErr("message delete attachment scan failed (msg=%s): %v", messageID, err)
+			return ""
+		}
+		if text := strings.TrimSpace(contentText); text != "" {
+			parts = append(parts, text)
+			continue
+		}
+		if name := strings.TrimSpace(filename); name != "" {
+			parts = append(parts, "[attachment] "+name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		logDBErr("message delete attachment rows failed (msg=%s): %v", messageID, err)
+		return ""
+	}
+	return summarizeAttachmentLogContent(parts)
 }
 
 func handleGuildCreate(stmts *preparedStatements, g *discordgo.GuildCreate) {
@@ -1912,6 +1995,14 @@ func logMessageSentEvent(
 	guildID, channelID, messageID, senderName, content, createdAt string,
 ) {
 	logMessageEvent(s, db, "message_sent", guildID, channelID, messageID, senderName, content, createdAt, "", false)
+}
+
+func logMessageDeletedEvent(
+	s *discordgo.Session,
+	db *sql.DB,
+	guildID, channelID, messageID, senderName, content, deletedAt string,
+) {
+	logMessageEvent(s, db, "message_deleted", guildID, channelID, messageID, senderName, content, deletedAt, "", false)
 }
 
 func logMessageModifiedEvent(

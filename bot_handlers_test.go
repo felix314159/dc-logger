@@ -640,7 +640,7 @@ func TestHandleMessageUpdateAndDelete_IgnoreBots(t *testing.T) {
 		},
 	})
 
-	handleMessageDelete(stmts, &discordgo.MessageDelete{
+	handleMessageDelete(nil, db, stmts, &discordgo.MessageDelete{
 		Message: &discordgo.Message{
 			ID:        "4001",
 			GuildID:   "guild-4",
@@ -718,7 +718,7 @@ func TestHandleMessageDelete_MarksAttachmentsDeleted(t *testing.T) {
 		},
 	})
 
-	handleMessageDelete(stmts, &discordgo.MessageDelete{
+	handleMessageDelete(nil, db, stmts, &discordgo.MessageDelete{
 		Message: &discordgo.Message{
 			ID:        "5001",
 			GuildID:   "guild-5",
@@ -737,6 +737,81 @@ func TestHandleMessageDelete_MarksAttachmentsDeleted(t *testing.T) {
 	}
 	if deletedAt == "" {
 		t.Fatal("expected attachment deleted_at to be set")
+	}
+}
+
+func TestHandleMessageDelete_LogsDeletedMessageContentFromCache(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	out := captureStdout(t, func() {
+		handleMessageDelete(nil, db, stmts, &discordgo.MessageDelete{
+			Message: &discordgo.Message{
+				ID:        "5002",
+				GuildID:   "guild-5",
+				ChannelID: "channel-5",
+			},
+			BeforeDelete: &discordgo.Message{
+				Content: "deleted text",
+				Author: &discordgo.User{
+					ID:       "user-5",
+					Username: "dolor",
+				},
+			},
+		})
+	})
+
+	if !strings.Contains(out, "Event: message_deleted\n") ||
+		!strings.Contains(out, "User: dolor\n") ||
+		!strings.Contains(out, "Channel: #channel-5\n") ||
+		!strings.Contains(out, "Message: deleted text\n") {
+		t.Fatalf("deleted message log did not include cached message details, got %q", out)
+	}
+}
+
+func TestHandleMessageDelete_LogsDeletedMessageContentFromStoredMessage(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	setTrackedEventLoggingEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "5003",
+			GuildID:   "guild-5",
+			ChannelID: "channel-5",
+			Content:   "stored before delete",
+			Timestamp: time.Now().UTC(),
+			Author: &discordgo.User{
+				ID:       "user-5",
+				Username: "dolor",
+			},
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	out := captureStdout(t, func() {
+		handleMessageDelete(nil, db, stmts, &discordgo.MessageDelete{
+			Message: &discordgo.Message{
+				ID:        "5003",
+				GuildID:   "guild-5",
+				ChannelID: "channel-5",
+			},
+		})
+	})
+
+	if !strings.Contains(out, "Event: message_deleted\n") ||
+		!strings.Contains(out, "User: dolor\n") ||
+		!strings.Contains(out, "Message: stored before delete\n") {
+		t.Fatalf("deleted message log did not include stored message details, got %q", out)
 	}
 }
 

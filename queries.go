@@ -758,6 +758,19 @@ FROM messages
 WHERE message_id = ?;
 `
 
+const selectMessageDeleteLogFieldsByIDQuery = `
+SELECT content, author_id
+FROM messages
+WHERE message_id = ?;
+`
+
+const selectAttachmentLogFieldsByMessageIDQuery = `
+SELECT content_text, filename
+FROM attachments
+WHERE message_id = ?
+ORDER BY id;
+`
+
 const selectLifecyclePayloadByTypeAndMessageLatestQuery = `
 SELECT payload_json
 FROM lifecycle_events
