@@ -284,6 +284,9 @@ func TestLiveMessageLogSeparatorsStartAfterEnabled(t *testing.T) {
 	if got := strings.Count(afterEnabled, separator); got != 1 {
 		t.Fatalf("expected exactly one separator between two live messages, got %d in %q", got, afterEnabled)
 	}
+	if !strings.Contains(afterEnabled, separator+"Event: message_sent\nUser: alice\n") {
+		t.Fatalf("expected blank line after separator before next message, got %q", afterEnabled)
+	}
 }
 
 func TestHandleMessageCreate_EmptyContentSkipsPersistenceButAdvancesState(t *testing.T) {

@@ -677,7 +677,7 @@ func registerHandlers(
 				budgetReason,
 			)
 			log.Println("startup complete! backfill finished; realtime logging remains active")
-			fmt.Println(strings.Repeat(string('-'), 158))
+			fmt.Printf("%s\n\n", strings.Repeat(string('-'), 158))
 			setLiveMessageLogSeparatorsEnabled(true)
 		}()
 	})
@@ -1961,7 +1961,7 @@ func renderMessageEventLog(eventType, senderName, threadName, channelName, conte
 }
 
 func renderLiveMessageLogSeparator() string {
-	return "\x1b[90m" + strings.Repeat("-", 80) + "\x1b[0m\n"
+	return "\x1b[90m" + strings.Repeat("-", 80) + "\x1b[0m\n\n"
 }
 
 func messageSentLogContent(content, attachmentLogContent string) string {
