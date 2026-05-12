@@ -722,6 +722,26 @@ INSERT INTO reactions(
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `
 
+// insertReactionDedupQuery is used by reaction backfill to insert a
+// historical reaction_added row only when no matching row already exists.
+// We dedup on (guild, message, user, emoji_id, emoji_name) because a single
+// user can only have one active reaction per emoji on a given message.
+const insertReactionDedupQuery = `
+INSERT INTO reactions(
+	event_type, guild_id, channel_id, message_id, user_id, emoji_id, emoji_name, emoji_animated, occurred_at
+)
+SELECT 'reaction_added', ?, ?, ?, ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+	SELECT 1 FROM reactions
+	WHERE event_type = 'reaction_added'
+		AND guild_id = ?
+		AND message_id = ?
+		AND user_id = ?
+		AND emoji_id = ?
+		AND emoji_name = ?
+);
+`
+
 const upsertGuildMemberQuery = `
 INSERT INTO guild_members(guild_id, user_id, updated_at)
 VALUES (?, ?, ?)

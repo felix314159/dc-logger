@@ -31,6 +31,7 @@ type preparedStatements struct {
 	deleteMemberRolesByUser         *sql.Stmt
 	upsertRolePingEvent             *sql.Stmt
 	insertReaction                  *sql.Stmt
+	insertReactionDedup             *sql.Stmt
 	upsertGuildMember               *sql.Stmt
 	deleteGuildMember               *sql.Stmt
 	upsertArchivedDiscoveryState    *sql.Stmt
@@ -113,6 +114,10 @@ func prepareStatements(db *sql.DB) (*preparedStatements, error) {
 		cleanup()
 		return nil, err
 	}
+	if err := prepare(&stmts.insertReactionDedup, insertReactionDedupQuery, "reaction dedup insert"); err != nil {
+		cleanup()
+		return nil, err
+	}
 	if err := prepare(&stmts.markMessageEdited, markMessageEditedQuery, "message edit mark"); err != nil {
 		cleanup()
 		return nil, err
@@ -188,6 +193,7 @@ func closePreparedStatements(stmts *preparedStatements) {
 	closeStmt("upsert ping event", stmts.upsertPingEvent)
 	closeStmt("upsert role ping event", stmts.upsertRolePingEvent)
 	closeStmt("insert reaction", stmts.insertReaction)
+	closeStmt("insert reaction dedup", stmts.insertReactionDedup)
 	closeStmt("upsert archived discovery state", stmts.upsertArchivedDiscoveryState)
 }
 

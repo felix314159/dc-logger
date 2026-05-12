@@ -37,6 +37,27 @@ var channelMessagesFetcher = func(
 	return s.ChannelMessages(channelID, limit, beforeID, afterID, aroundID)
 }
 
+// backfillReactionsWindow bounds how far back the bot walks reactions for
+// messages it already missed live events for. Messages older than this are
+// skipped: a single REST roundtrip per emoji per message gets expensive at
+// scale, and reactions far in the past matter much less for forensic logs.
+const backfillReactionsWindow = 24 * time.Hour
+
+// messageReactionsFetcher is overridable for tests. It returns the users who
+// currently have the given reaction on a message. afterID drives pagination
+// (Discord returns users in ascending ID order).
+var messageReactionsFetcher = func(
+	s *discordgo.Session,
+	channelID, messageID, emojiAPI string,
+	limit int,
+	afterID string,
+) ([]*discordgo.User, error) {
+	if s == nil {
+		return nil, fmt.Errorf("discord session is nil")
+	}
+	return s.MessageReactions(channelID, messageID, emojiAPI, limit, "", afterID)
+}
+
 var guildActiveThreadsFetcher = func(s *discordgo.Session, guildID string) ([]*discordgo.Channel, error) {
 	if s == nil {
 		return nil, fmt.Errorf("discord session is nil")
@@ -732,7 +753,89 @@ func persistBackfillMessage(
 		return false, fmt.Errorf("insert lifecycle event for msg=%s: %w", m.ID, err)
 	}
 
+	backfillRecentMessageReactions(s, stmts, guildID, channelID, m, createdAt)
+
 	return messageInserted || eventInserted, nil
+}
+
+// backfillRecentMessageReactions persists reaction_added rows for any reactions
+// currently present on m, but only when m was sent within
+// backfillReactionsWindow. Discord doesn't expose per-user reaction
+// timestamps, so the message's createdAt is used as occurred_at. Inserts are
+// deduplicated against existing rows so repeat backfills are idempotent.
+// Reactions that were added and later removed while the bot was offline are
+// unrecoverable and silently ignored.
+func backfillRecentMessageReactions(
+	s *discordgo.Session,
+	stmts *preparedStatements,
+	guildID, channelID string,
+	m *discordgo.Message,
+	occurredAt string,
+) {
+	if stmts == nil || stmts.insertReactionDedup == nil || m == nil || len(m.Reactions) == 0 {
+		return
+	}
+	if m.Timestamp.IsZero() || time.Since(m.Timestamp) > backfillReactionsWindow {
+		return
+	}
+
+	for _, mr := range m.Reactions {
+		if mr == nil || mr.Emoji == nil {
+			continue
+		}
+		emoji := mr.Emoji
+		emojiAPI := emoji.APIName()
+		if strings.TrimSpace(emojiAPI) == "" {
+			continue
+		}
+		emojiID := strings.TrimSpace(emoji.ID)
+		emojiName := strings.TrimSpace(emoji.Name)
+
+		afterID := ""
+		for {
+			const pageSize = 100
+			users, err := messageReactionsFetcher(s, channelID, m.ID, emojiAPI, pageSize, afterID)
+			if err != nil {
+				logDBErr("backfill MessageReactions failed (channel=%s msg=%s emoji=%s): %v", channelID, m.ID, emojiAPI, err)
+				break
+			}
+			if len(users) == 0 {
+				break
+			}
+			for _, u := range users {
+				if u == nil || strings.TrimSpace(u.ID) == "" {
+					continue
+				}
+				if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, guildID, u, occurredAt); err != nil {
+					logDBErr("backfill reaction user upsert failed (user=%s): %v", u.ID, err)
+				}
+				if err := upsertGuildMemberRow(stmts.upsertGuildMember, guildID, u.ID, occurredAt); err != nil {
+					logDBErr("backfill reaction member upsert failed (guild=%s user=%s): %v", guildID, u.ID, err)
+				}
+				if _, err := stmts.insertReactionDedup.Exec(
+					guildID,
+					channelID,
+					m.ID,
+					u.ID,
+					emojiID,
+					emojiName,
+					boolToInt(emoji.Animated),
+					occurredAt,
+					guildID,
+					m.ID,
+					u.ID,
+					emojiID,
+					emojiName,
+				); err != nil {
+					logDBErr("backfill reaction insert failed (msg=%s user=%s emoji=%s): %v", m.ID, u.ID, emojiAPI, err)
+				}
+			}
+			if len(users) < pageSize {
+				break
+			}
+			afterID = users[len(users)-1].ID
+		}
+	}
 }
 
 func fetchActiveThreads(s *discordgo.Session, guildID string, run *backfillRun) ([]*discordgo.Channel, error) {

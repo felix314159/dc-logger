@@ -680,6 +680,113 @@ func TestPersistBackfillMessage_DedupesAfterLiveReplay(t *testing.T) {
 	}
 }
 
+func TestPersistBackfillMessage_BackfillsRecentReactionsWithDedup(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	prev := messageReactionsFetcher
+	calls := 0
+	messageReactionsFetcher = func(s *discordgo.Session, channelID, messageID, emojiAPI string, limit int, afterID string) ([]*discordgo.User, error) {
+		calls++
+		if channelID != "channel-rx" || messageID != "msg-rx" {
+			t.Fatalf("unexpected reaction fetch (channel=%q msg=%q)", channelID, messageID)
+		}
+		switch emojiAPI {
+		case "👍":
+			return []*discordgo.User{
+				{ID: "user-a", Username: "alice"},
+				{ID: "user-b", Username: "bob"},
+			}, nil
+		case "blobwave:42":
+			return []*discordgo.User{
+				{ID: "user-a", Username: "alice"},
+			}, nil
+		default:
+			t.Fatalf("unexpected emoji api form: %q", emojiAPI)
+			return nil, nil
+		}
+	}
+	t.Cleanup(func() { messageReactionsFetcher = prev })
+
+	msg := &discordgo.Message{
+		ID:        "msg-rx",
+		GuildID:   "guild-rx",
+		ChannelID: "channel-rx",
+		Content:   "react to me",
+		Timestamp: time.Now().UTC(),
+		Author: &discordgo.User{
+			ID:       "author-rx",
+			Username: "author",
+		},
+		Reactions: []*discordgo.MessageReactions{
+			{Count: 2, Emoji: &discordgo.Emoji{Name: "👍"}},
+			{Count: 1, Emoji: &discordgo.Emoji{ID: "42", Name: "blobwave"}},
+		},
+	}
+
+	if _, err := persistBackfillMessage(db, stmts, nil, "guild-rx", "channel-rx", "", msg); err != nil {
+		t.Fatalf("first persistBackfillMessage failed: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 reaction fetches, got %d", calls)
+	}
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg-rx").Scan(&total); err != nil {
+		t.Fatalf("count reactions failed: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("expected 3 reaction rows, got %d", total)
+	}
+
+	if _, err := persistBackfillMessage(db, stmts, nil, "guild-rx", "channel-rx", "", msg); err != nil {
+		t.Fatalf("second persistBackfillMessage failed: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg-rx").Scan(&total); err != nil {
+		t.Fatalf("count reactions after rerun failed: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("expected dedup to keep 3 reaction rows, got %d", total)
+	}
+}
+
+func TestPersistBackfillMessage_SkipsReactionBackfillOutsideWindow(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	prev := messageReactionsFetcher
+	messageReactionsFetcher = func(s *discordgo.Session, channelID, messageID, emojiAPI string, limit int, afterID string) ([]*discordgo.User, error) {
+		t.Fatalf("messageReactionsFetcher should not be invoked for old messages")
+		return nil, nil
+	}
+	t.Cleanup(func() { messageReactionsFetcher = prev })
+
+	msg := &discordgo.Message{
+		ID:        "msg-old",
+		GuildID:   "guild-rx",
+		ChannelID: "channel-rx",
+		Content:   "old message",
+		Timestamp: time.Now().UTC().Add(-(backfillReactionsWindow + time.Hour)),
+		Author: &discordgo.User{
+			ID:       "author-old",
+			Username: "author",
+		},
+		Reactions: []*discordgo.MessageReactions{
+			{Count: 1, Emoji: &discordgo.Emoji{Name: "👍"}},
+		},
+	}
+
+	if _, err := persistBackfillMessage(db, stmts, nil, "guild-rx", "channel-rx", "", msg); err != nil {
+		t.Fatalf("persistBackfillMessage failed: %v", err)
+	}
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg-old").Scan(&total); err != nil {
+		t.Fatalf("count reactions failed: %v", err)
+	}
+	if total != 0 {
+		t.Fatalf("expected reactions to be skipped for old message, got %d rows", total)
+	}
+}
+
 func testBackfillMessage(id string) *discordgo.Message {
 	return &discordgo.Message{
 		ID:        id,
