@@ -14,6 +14,8 @@ const (
 	eventMessageSkipped  lifecycleEventType = "message_skipped"
 	eventMessageUpdated  lifecycleEventType = "message_updated"
 	eventMessageDeleted  lifecycleEventType = "message_deleted"
+	eventReactionAdded   lifecycleEventType = "reaction_added"
+	eventReactionRemoved lifecycleEventType = "reaction_removed"
 	eventThreadCreated   lifecycleEventType = "thread_created"
 	eventThreadDeleted   lifecycleEventType = "thread_deleted"
 	eventThreadRenamed   lifecycleEventType = "thread_renamed"

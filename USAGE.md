@@ -51,7 +51,6 @@ cp .env.example .env
 Edit `.env` and set at minimum:
 
 - `DISCORD_BOT_TOKEN`
-- `DISCORD_LOG_DB` (or keep default)
 - `DISCORD_SYNC_GUILD_IDS="*"` for first run
 
 `.env` is gitignored in this repository so bot tokens and local IDs are not committed.
@@ -120,11 +119,9 @@ Canonical env-var keys/defaults are centralized in `internal/config/env.go`.
   - Bot token used to connect to Discord.
   - No default. Process exits if missing.
 
-### Optional
+Databases are stored under `./database` with filenames derived from the server name and guild ID.
 
-- `DISCORD_LOG_DB`
-  - Path to SQLite database file.
-  - Default: `./database/database.db`
+### Optional
 
 - `DISCORD_BACKFILL_MAX_PAGES_PER_RUN`
   - Startup backfill budget: max number of message-page requests per run.
@@ -147,6 +144,10 @@ Canonical env-var keys/defaults are centralized in `internal/config/env.go`.
   - Use `*` to sync all guilds the bot is in.
   - If you do not know your guild ID yet, leave this unset for first run and copy the ID(s) from startup logs (`syncing guilds: <name> (<id>)`).
   - Persist chosen ID(s) in `DISCORD_SYNC_GUILD_IDS` (for example in your shell profile or service env file).
+
+- `LOG_REACTIONS`
+  - Set to `False` to persist reaction events without printing realtime reaction logs.
+  - Default: `True`
 
 If a backfill budget value is invalid (non-integer or negative), the app logs a warning and falls back to default.
 
@@ -243,7 +244,7 @@ Notes:
 
 - Output is JSON.
 - Failures are JSON with stable `error.code` values and non-zero exit codes.
-- Default DB path is `DISCORD_LOG_DB` or `./database/database.db`.
+- `dc-query` auto-discovers the database under `./database`; when multiple server databases exist, pass `--guild-id` or `--guild-name`.
 - `--guild-id`/`--guild-name` are optional; when both are omitted, `dc-query` uses the most common guild ID found in the database.
 - `recent-messages-in-channel` accepts `--channel-id` or `--channel-name`.
 - `list-server-members` returns current known guild members (current-state snapshot).

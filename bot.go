@@ -35,6 +35,7 @@ const (
 var trackedEventLoggingEnabled atomic.Bool
 var liveMessageLogSeparatorsEnabled atomic.Bool
 var liveMessageLogServerNamesEnabled atomic.Bool
+var liveReactionLogsEnabled atomic.Bool
 
 var (
 	liveMessageLogPrintMu                       sync.Mutex
@@ -542,6 +543,7 @@ func newDiscordSession(token string) (*discordgo.Session, error) {
 		discordgo.IntentsGuildBans |
 		discordgo.IntentsGuildMembers |
 		discordgo.IntentsGuildMessages |
+		discordgo.IntentsGuildMessageReactions |
 		discordgo.IntentsMessageContent
 	return dg, nil
 }
@@ -559,6 +561,7 @@ func registerHandlers(
 	setTrackedEventLoggingEnabled(false)
 	setLiveMessageLogSeparatorsEnabled(false)
 	setLiveMessageLogServerNamesEnabled(false)
+	setLiveReactionLogsEnabled(getenvBoolDefault(config.EnvLogReactions, true))
 
 	dg.AddHandler(func(s *discordgo.Session, rl *discordgo.RateLimit) {
 		m := activeBackfillMetrics.Load()
@@ -760,6 +763,22 @@ func registerHandlers(
 		}
 		if entry := guildDBs.get(m.GuildID); entry != nil {
 			handleMessageDelete(s, entry.db, entry.stmts, m)
+		}
+	})
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.MessageReactionAdd) {
+		if r == nil || r.MessageReaction == nil || !syncEnabled.Load() || !guildFilter.allows(r.GuildID) {
+			return
+		}
+		if entry := guildDBs.get(r.GuildID); entry != nil {
+			handleMessageReactionAdd(s, entry.db, entry.stmts, r)
+		}
+	})
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.MessageReactionRemove) {
+		if r == nil || r.MessageReaction == nil || !syncEnabled.Load() || !guildFilter.allows(r.GuildID) {
+			return
+		}
+		if entry := guildDBs.get(r.GuildID); entry != nil {
+			handleMessageReactionRemove(s, entry.db, entry.stmts, r)
 		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
@@ -1282,6 +1301,125 @@ func handleMessageDelete(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		senderName = authorID
 	}
 	logMessageDeletedEvent(s, db, m.GuildID, m.ChannelID, m.ID, senderName, content, deletedAt)
+}
+
+func handleMessageReactionAdd(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, r *discordgo.MessageReactionAdd) {
+	if r == nil || r.MessageReaction == nil {
+		return
+	}
+	handleMessageReaction(s, db, stmts, eventReactionAdded, r.MessageReaction, r.Member)
+}
+
+func handleMessageReactionRemove(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, r *discordgo.MessageReactionRemove) {
+	if r == nil || r.MessageReaction == nil {
+		return
+	}
+	handleMessageReaction(s, db, stmts, eventReactionRemoved, r.MessageReaction, nil)
+}
+
+func handleMessageReaction(
+	s *discordgo.Session,
+	db *sql.DB,
+	stmts *preparedStatements,
+	eventType lifecycleEventType,
+	r *discordgo.MessageReaction,
+	member *discordgo.Member,
+) {
+	if r == nil || stmts == nil || r.GuildID == "" || r.ChannelID == "" || r.MessageID == "" || r.UserID == "" {
+		return
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := upsertGuildFromState(s, stmts.upsertIDNameMapping, r.GuildID, now); err != nil {
+		logDBErr("guild name mapping upsert failed (guild=%s): %v", r.GuildID, err)
+	}
+	if err := upsertChannelFromMessage(s, stmts.upsertChannel, stmts.upsertIDNameMapping, r.GuildID, r.ChannelID, now); err != nil {
+		logDBErr("channel upsert failed (channel=%s): %v", r.ChannelID, err)
+	}
+	if member != nil && member.User != nil {
+		if err := upsertUserRow(stmts.upsertUser, stmts.upsertIDNameMapping, r.GuildID, member.User, now); err != nil {
+			logDBErr("user upsert failed (author=%s): %v", member.User.ID, err)
+		}
+		if err := upsertGuildMemberRow(stmts.upsertGuildMember, r.GuildID, member.User.ID, now); err != nil {
+			logDBErr("guild member upsert failed (guild=%s user=%s): %v", r.GuildID, member.User.ID, err)
+		}
+	}
+
+	emojiID, emojiName, emojiAnimated := reactionEmojiFields(r.Emoji)
+	if _, err := stmts.insertReaction.Exec(
+		string(eventType),
+		r.GuildID,
+		r.ChannelID,
+		r.MessageID,
+		r.UserID,
+		emojiID,
+		emojiName,
+		boolToInt(emojiAnimated),
+		now,
+	); err != nil {
+		logDBErr("reaction insert failed (type=%s msg=%s user=%s): %v", eventType, r.MessageID, r.UserID, err)
+		return
+	}
+
+	userName := reactionUserDisplayName(s, db, r.GuildID, r.UserID, member)
+	msgURL := discordMessageURL(r.GuildID, r.ChannelID, r.MessageID)
+	payload := map[string]any{
+		"emoji_id":       emojiID,
+		"emoji_name":     emojiName,
+		"emoji_animated": emojiAnimated,
+		"message_url":    msgURL,
+		"user_name":      userName,
+	}
+	if err := recordLifecycleEvent(
+		stmts.insertEvent,
+		eventType,
+		r.GuildID,
+		r.ChannelID,
+		r.MessageID,
+		r.UserID,
+		now,
+		payload,
+	); err != nil {
+		logDBErr("event insert failed (type=%s msg=%s user=%s): %v", eventType, r.MessageID, r.UserID, err)
+	}
+
+	logTrackedEvent(eventType, r.GuildID, r.ChannelID, r.MessageID, r.UserID, payload)
+	logReactionEvent(s, db, eventType, r.GuildID, r.ChannelID, r.MessageID, userName, msgURL, now)
+}
+
+func reactionEmojiFields(e discordgo.Emoji) (id, name string, animated bool) {
+	return strings.TrimSpace(e.ID), strings.TrimSpace(e.Name), e.Animated
+}
+
+func reactionUserDisplayName(s *discordgo.Session, db *sql.DB, guildID, userID string, member *discordgo.Member) string {
+	if member != nil {
+		if nick := strings.TrimSpace(member.Nick); nick != "" {
+			return nick
+		}
+		if n := messageAuthorDisplayName(member.User); n != "" {
+			return n
+		}
+	}
+	if n := resolveMentionUserDisplayName(s, db, guildID, userID); n != "" {
+		return n
+	}
+	return strings.TrimSpace(userID)
+}
+
+func discordMessageURL(guildID, channelID, messageID string) string {
+	return fmt.Sprintf(
+		"https://discord.com/channels/%s/%s/%s",
+		strings.TrimSpace(guildID),
+		strings.TrimSpace(channelID),
+		strings.TrimSpace(messageID),
+	)
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func messageDeleteLogFields(db *sql.DB, m *discordgo.MessageDelete) (content, authorID, senderName string) {
@@ -2105,6 +2243,18 @@ func logMessageModifiedEvent(
 	logMessageEvent(s, db, "message_modified", guildID, channelID, messageID, senderName, newContent, modifiedAt, oldContent, hasOldContent)
 }
 
+func logReactionEvent(
+	s *discordgo.Session,
+	db *sql.DB,
+	eventType lifecycleEventType,
+	guildID, channelID, messageID, userName, messageURL, eventAt string,
+) {
+	if !liveReactionLogsEnabled.Load() {
+		return
+	}
+	logMessageEvent(s, db, string(eventType), guildID, channelID, messageID, userName, messageURL, eventAt, "", false)
+}
+
 func logMessageEvent(
 	s *discordgo.Session,
 	db *sql.DB,
@@ -2487,6 +2637,10 @@ func setLiveMessageLogSeparatorsEnabled(enabled bool) {
 
 func setLiveMessageLogServerNamesEnabled(enabled bool) {
 	liveMessageLogServerNamesEnabled.Store(enabled)
+}
+
+func setLiveReactionLogsEnabled(enabled bool) {
+	liveReactionLogsEnabled.Store(enabled)
 }
 
 func notifyStartupFatal(startupFatal chan<- error, err error) {

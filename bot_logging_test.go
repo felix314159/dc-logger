@@ -152,6 +152,32 @@ func TestRenderMessageDeletedEventLog_ColorsMessageContent(t *testing.T) {
 	}
 }
 
+func TestRenderReactionEventLog_UsesMessageURL(t *testing.T) {
+	got := renderMessageEventLogWithServer(
+		"Example Server",
+		"reaction_added",
+		"lorem",
+		"#thread",
+		"#general",
+		"https://discord.com/channels/guild-1/thread-1/message-1",
+		"2026-03-02, 04:28:15 PM",
+		"",
+		false,
+	)
+
+	want := "" +
+		"Server: Example Server\n" +
+		"Event: reaction_added\n" +
+		"User: lorem\n" +
+		"Thread: #thread\n" +
+		"Channel: #general\n" +
+		"Message: https://discord.com/channels/guild-1/thread-1/message-1\n" +
+		"Time: 2026-03-02, 04:28:15 PM\n\n"
+	if got != want {
+		t.Fatalf("formatted reaction_added log mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
 func TestReplaceMentionsWithDisplayNames(t *testing.T) {
 	got := replaceMentionsWithDisplayNames(
 		nil,

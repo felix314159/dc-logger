@@ -223,6 +223,31 @@ CREATE INDEX IF NOT EXISTS idx_role_ping_events_role_time
 CREATE INDEX IF NOT EXISTS idx_role_ping_events_message
 	ON role_ping_events(message_id, id);
 
+CREATE TABLE IF NOT EXISTS reactions (
+	id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	event_type     TEXT NOT NULL,
+	guild_id       TEXT NOT NULL,
+	channel_id     TEXT NOT NULL,
+	message_id     TEXT NOT NULL,
+	user_id        TEXT NOT NULL,
+	emoji_id       TEXT NOT NULL,
+	emoji_name     TEXT NOT NULL,
+	emoji_animated INTEGER NOT NULL,
+	occurred_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reactions_message_time
+	ON reactions(message_id, occurred_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_reactions_guild_message_time
+	ON reactions(guild_id, message_id, occurred_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_reactions_user_time
+	ON reactions(guild_id, user_id, occurred_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_reactions_emoji_message_time
+	ON reactions(guild_id, emoji_id, emoji_name, message_id, occurred_at, id);
+
 CREATE TABLE IF NOT EXISTS lifecycle_events (
 	id           INTEGER PRIMARY KEY AUTOINCREMENT,
 	event_type   TEXT NOT NULL,
@@ -291,6 +316,22 @@ var sqlitePostMigrationIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_attachments_guild_created ON attachments(guild_id, created_at, attachment_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_attachments_channel_created ON attachments(channel_id, created_at, attachment_id);`,
 	`CREATE INDEX IF NOT EXISTS idx_attachments_author_created ON attachments(author_id, created_at, attachment_id);`,
+	`CREATE TABLE IF NOT EXISTS reactions (
+		id             INTEGER PRIMARY KEY AUTOINCREMENT,
+		event_type     TEXT NOT NULL,
+		guild_id       TEXT NOT NULL,
+		channel_id     TEXT NOT NULL,
+		message_id     TEXT NOT NULL,
+		user_id        TEXT NOT NULL,
+		emoji_id       TEXT NOT NULL,
+		emoji_name     TEXT NOT NULL,
+		emoji_animated INTEGER NOT NULL,
+		occurred_at    TEXT NOT NULL
+	);`,
+	`CREATE INDEX IF NOT EXISTS idx_reactions_message_time ON reactions(message_id, occurred_at, id);`,
+	`CREATE INDEX IF NOT EXISTS idx_reactions_guild_message_time ON reactions(guild_id, message_id, occurred_at, id);`,
+	`CREATE INDEX IF NOT EXISTS idx_reactions_user_time ON reactions(guild_id, user_id, occurred_at, id);`,
+	`CREATE INDEX IF NOT EXISTS idx_reactions_emoji_message_time ON reactions(guild_id, emoji_id, emoji_name, message_id, occurred_at, id);`,
 	`CREATE INDEX IF NOT EXISTS idx_lifecycle_events_guild_type_time ON lifecycle_events(guild_id, event_type, occurred_at, id);`,
 	`CREATE INDEX IF NOT EXISTS idx_lifecycle_events_guild_actor_time ON lifecycle_events(guild_id, actor_id, occurred_at, id);`,
 }
@@ -673,6 +714,12 @@ INSERT INTO role_ping_events(
 ON CONFLICT(message_id, actor_id, role_id) DO UPDATE SET
 	role_name=excluded.role_name,
 	occurred_at=excluded.occurred_at;
+`
+
+const insertReactionQuery = `
+INSERT INTO reactions(
+	event_type, guild_id, channel_id, message_id, user_id, emoji_id, emoji_name, emoji_animated, occurred_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `
 
 const upsertGuildMemberQuery = `

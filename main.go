@@ -16,8 +16,7 @@ func main() {
 		log.Fatalf("%s is not set", config.EnvDiscordBotToken)
 	}
 
-	dbPath := getenvDefault(config.EnvDiscordLogDB, config.DefaultLogDBPath)
-	if err := runBot(token, dbPath); err != nil {
+	if err := runBot(token, config.DefaultDatabaseDir); err != nil {
 		log.Fatalf("bot failed: %v", err)
 	}
 }

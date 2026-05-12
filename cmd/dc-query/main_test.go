@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"example.org/dc-logger/internal/config"
 	"example.org/dc-logger/internal/querysvc"
 
 	_ "modernc.org/sqlite"
@@ -19,7 +18,8 @@ import (
 func seedQueryDB(t *testing.T) string {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "query-cli.db")
+	t.Chdir(t.TempDir())
+	dbPath := filepath.Join(".", "database", "db_lorem_g1.db")
 	seedQueryDBAt(t, dbPath)
 	return dbPath
 }
@@ -68,12 +68,12 @@ func seedQueryDBAt(t *testing.T, dbPath string) {
 }
 
 func TestRunSearchMessagesCommand(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"search-messages", "--db", dbPath, "--guild-id", "g1", "--query", "incident"},
+		[]string{"search-messages", "--guild-id", "g1", "--query", "incident"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -97,11 +97,10 @@ func TestRunSearchMessagesCommand(t *testing.T) {
 	}
 }
 
-func TestRunSearchMessages_DefaultDBPathWhenFlagAndEnvUnset(t *testing.T) {
-	t.Setenv(config.EnvDiscordLogDB, "")
+func TestRunSearchMessages_AutoDiscoversSingleDefaultDB(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	dbPath := filepath.Join(".", "database", "database.db")
+	dbPath := filepath.Join(".", "database", "db_lorem_g1.db")
 	seedQueryDBAt(t, dbPath)
 
 	var stdout bytes.Buffer
@@ -128,6 +127,56 @@ func TestRunSearchMessages_DefaultDBPathWhenFlagAndEnvUnset(t *testing.T) {
 	}
 	if out.Count != 3 {
 		t.Fatalf("unexpected count: got %d want 3", out.Count)
+	}
+}
+
+func TestRunSearchMessages_AutoSelectsDefaultDBByGuildID(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	seedQueryDBAt(t, filepath.Join(".", "database", "db_lorem_g1.db"))
+	seedQueryDBAt(t, filepath.Join(".", "database", "db_ipsum_g2.db"))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exit := run(
+		[]string{"search-messages", "--guild-id", "g1", "--query", "incident"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+	)
+	if exit != 0 {
+		t.Fatalf("unexpected exit code: got %d, stderr=%s", exit, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	var out response
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode response failed: %v\nraw=%s", err, stdout.String())
+	}
+	if out.Count != 3 {
+		t.Fatalf("unexpected count: got %d want 3", out.Count)
+	}
+}
+
+func TestRunSearchMessages_DBFlagIsRemoved(t *testing.T) {
+	seedQueryDB(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	removedFlag := "-" + "-db"
+	exit := run(
+		[]string{"search-messages", removedFlag, "ignored.db", "--guild-id", "g1", "--query", "incident"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+	)
+	if exit == 0 {
+		t.Fatalf("expected removed database flag to fail")
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined: -db") {
+		t.Fatalf("unexpected stderr for removed database flag: %s", stderr.String())
 	}
 }
 
@@ -170,14 +219,13 @@ func TestPrintResponse_LocalizesTimestampFields(t *testing.T) {
 }
 
 func TestRunRecentMessagesCommand_WithTimeWindow(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
 		[]string{
 			"recent-messages",
-			"--db", dbPath,
 			"--guild-id", "g1",
 			"--since", "2026-01-01T00:00:03Z",
 			"--until", "2026-01-01T00:00:04Z",
@@ -212,14 +260,13 @@ func TestRunRecentMessagesCommand_WithTimeWindow(t *testing.T) {
 }
 
 func TestRunRecentMessagesCommand_WithBeforeCursor(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
 		[]string{
 			"recent-messages",
-			"--db", dbPath,
 			"--guild-id", "g1",
 			"--before-time", "2026-01-01T00:00:04Z",
 			"--before-id", "a2",
@@ -251,14 +298,13 @@ func TestRunRecentMessagesCommand_WithBeforeCursor(t *testing.T) {
 }
 
 func TestRunRecentEventsCommand(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
 		[]string{
 			"recent-events",
-			"--db", dbPath,
 			"--guild-name", "Lorem",
 			"--event-type", "message_deleted",
 			"--author-name", "dolor",
@@ -299,10 +345,9 @@ func TestRunRecentEventsCommand(t *testing.T) {
 }
 
 func TestRunJSONRequestMode(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 	reqBody, err := json.Marshal(request{
 		Command:  "last_message_by_user",
-		DBPath:   dbPath,
 		GuildID:  "g1",
 		AuthorID: "u1",
 	})
@@ -350,7 +395,6 @@ func TestRunJSONRequestMode_ServerActivityByDay(t *testing.T) {
 
 	reqBody, err := json.Marshal(request{
 		Command:   "server_activity_summary",
-		DBPath:    dbPath,
 		GuildName: "Lorem",
 		ByDay:     true,
 	})
@@ -386,11 +430,10 @@ func TestRunJSONRequestMode_ServerActivityByDay(t *testing.T) {
 }
 
 func TestRunResolvesAuthorName(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	reqBody, err := json.Marshal(request{
 		Command:    "last_message_by_user",
-		DBPath:     dbPath,
 		GuildName:  "Lorem",
 		AuthorName: "ipsum",
 	})
@@ -426,12 +469,12 @@ func TestRunResolvesAuthorName(t *testing.T) {
 }
 
 func TestRunListServerMembers(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"list-server-members", "--db", dbPath, "--guild-name", "Lorem", "--limit", "10"},
+		[]string{"list-server-members", "--guild-name", "Lorem", "--limit", "10"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -459,12 +502,12 @@ func TestRunListServerMembers(t *testing.T) {
 }
 
 func TestRunRolesOfUser(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"roles-of-user", "--db", dbPath, "--guild-name", "Lorem", "--author-name", "ipsum", "--limit", "10"},
+		[]string{"roles-of-user", "--guild-name", "Lorem", "--author-name", "ipsum", "--limit", "10"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -492,12 +535,12 @@ func TestRunRolesOfUser(t *testing.T) {
 }
 
 func TestRunUsersWithRole(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"users-with-role", "--db", dbPath, "--guild-name", "Lorem", "--role-name", "Consectetur", "--limit", "10"},
+		[]string{"users-with-role", "--guild-name", "Lorem", "--role-name", "Consectetur", "--limit", "10"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -525,12 +568,12 @@ func TestRunUsersWithRole(t *testing.T) {
 }
 
 func TestRunLastPingedUserByUser(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"last-pinged-user-by-user", "--db", dbPath, "--guild-name", "Lorem", "--author-name", "ipsum"},
+		[]string{"last-pinged-user-by-user", "--guild-name", "Lorem", "--author-name", "ipsum"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -561,12 +604,12 @@ func TestRunLastPingedUserByUser(t *testing.T) {
 }
 
 func TestRunRecentPingsTargetingUser(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"recent-pings-targeting-user", "--db", dbPath, "--guild-name", "Lorem", "--target-name", "dolor", "--limit", "5"},
+		[]string{"recent-pings-targeting-user", "--guild-name", "Lorem", "--target-name", "dolor", "--limit", "5"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -597,12 +640,12 @@ func TestRunRecentPingsTargetingUser(t *testing.T) {
 }
 
 func TestRunRecentPingsTargetingUser_IncludesRoleMentions(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"recent-pings-targeting-user", "--db", dbPath, "--guild-name", "Lorem", "--target-name", "ipsum", "--limit", "5"},
+		[]string{"recent-pings-targeting-user", "--guild-name", "Lorem", "--target-name", "ipsum", "--limit", "5"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -633,12 +676,12 @@ func TestRunRecentPingsTargetingUser_IncludesRoleMentions(t *testing.T) {
 }
 
 func TestRunUnansweredPingsTargetingUser(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"unanswered-pings-targeting-user", "--db", dbPath, "--guild-name", "Lorem", "--target-name", "dolor", "--since", "2026-01-01T00:00:00Z", "--limit", "5"},
+		[]string{"unanswered-pings-targeting-user", "--guild-name", "Lorem", "--target-name", "dolor", "--since", "2026-01-01T00:00:00Z", "--limit", "5"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -666,12 +709,12 @@ func TestRunUnansweredPingsTargetingUser(t *testing.T) {
 }
 
 func TestRunTopicActivitySummary(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"topic-activity-summary", "--db", dbPath, "--guild-name", "Lorem", "--query", "incident", "--limit", "10"},
+		[]string{"topic-activity-summary", "--guild-name", "Lorem", "--query", "incident", "--limit", "10"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -702,12 +745,12 @@ func TestRunTopicActivitySummary(t *testing.T) {
 }
 
 func TestRunSearchMessages_NoMatchesReturnsEmptyArray(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"search-messages", "--db", dbPath, "--guild-id", "g1", "--query", "no-such-token"},
+		[]string{"search-messages", "--guild-id", "g1", "--query", "no-such-token"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -735,14 +778,13 @@ func TestRunSearchMessages_NoMatchesReturnsEmptyArray(t *testing.T) {
 }
 
 func TestRunRecentMessages_ResolveNames(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
 		[]string{
 			"recent-messages",
-			"--db", dbPath,
 			"--guild-id", "g1",
 			"--resolve-names",
 			"--limit", "1",
@@ -771,14 +813,13 @@ func TestRunRecentMessages_ResolveNames(t *testing.T) {
 }
 
 func TestRunServerActivitySummary(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
 		[]string{
 			"server-activity-summary",
-			"--db", dbPath,
 			"--guild-name", "Lorem",
 			"--since", "2026-01-01T00:00:01Z",
 			"--until", "2026-01-01T00:00:02Z",
@@ -825,7 +866,6 @@ func TestRunServerActivitySummary_ByDay(t *testing.T) {
 	exit := run(
 		[]string{
 			"server-activity-summary",
-			"--db", dbPath,
 			"--guild-name", "Lorem",
 			"--by-day",
 		},
@@ -853,12 +893,12 @@ func TestRunServerActivitySummary_ByDay(t *testing.T) {
 }
 
 func TestRunChannelActivitySummary(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"channel-activity-summary", "--db", dbPath, "--guild-name", "Lorem", "--limit", "10"},
+		[]string{"channel-activity-summary", "--guild-name", "Lorem", "--limit", "10"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -883,12 +923,12 @@ func TestRunChannelActivitySummary(t *testing.T) {
 }
 
 func TestRunAuthorActivitySummary(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"author-activity-summary", "--db", dbPath, "--guild-name", "Lorem", "--limit", "10"},
+		[]string{"author-activity-summary", "--guild-name", "Lorem", "--limit", "10"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,
@@ -913,14 +953,13 @@ func TestRunAuthorActivitySummary(t *testing.T) {
 }
 
 func TestRunKeywordFrequency(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
 		[]string{
 			"keyword-frequency",
-			"--db", dbPath,
 			"--guild-name", "Lorem",
 			"--min-length", "4",
 			"--limit", "10",
@@ -949,12 +988,12 @@ func TestRunKeywordFrequency(t *testing.T) {
 }
 
 func TestRunStructuredErrorCode(t *testing.T) {
-	dbPath := seedQueryDB(t)
+	seedQueryDB(t)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exit := run(
-		[]string{"search-messages", "--db", dbPath, "--guild-id", "g1"},
+		[]string{"search-messages", "--guild-id", "g1"},
 		strings.NewReader(""),
 		&stdout,
 		&stderr,

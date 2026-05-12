@@ -360,6 +360,112 @@ func TestHandleMessageUpdate_LogsModifiedMessageOldAndNewFromStoredMessage(t *te
 	}
 }
 
+func TestHandleMessageReactionAdd_PersistsReactionAndLifecycleEvent(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+		setLiveReactionLogsEnabled(true)
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveReactionLogsEnabled(true)
+	out := captureStdout(t, func() {
+		handleMessageReactionAdd(nil, db, stmts, &discordgo.MessageReactionAdd{
+			MessageReaction: &discordgo.MessageReaction{
+				UserID:    "user-1",
+				MessageID: "message-1",
+				ChannelID: "channel-1",
+				GuildID:   "guild-1",
+				Emoji: discordgo.Emoji{
+					Name: "thumbsup",
+				},
+			},
+			Member: &discordgo.Member{
+				Nick: "Alice",
+				User: &discordgo.User{
+					ID:       "user-1",
+					Username: "alice",
+				},
+			},
+		})
+	})
+
+	if !strings.Contains(out, "Event: reaction_added\n") ||
+		!strings.Contains(out, "User: Alice\n") ||
+		!strings.Contains(out, "Channel: #channel-1\n") ||
+		!strings.Contains(out, "Message: https://discord.com/channels/guild-1/channel-1/message-1\n") {
+		t.Fatalf("reaction log missing expected fields, got %q", out)
+	}
+
+	var eventType, guildID, channelID, messageID, userID, emojiName string
+	if err := db.QueryRow(`
+SELECT event_type, guild_id, channel_id, message_id, user_id, emoji_name
+FROM reactions
+WHERE message_id = ?;`, "message-1").Scan(&eventType, &guildID, &channelID, &messageID, &userID, &emojiName); err != nil {
+		t.Fatalf("query reaction failed: %v", err)
+	}
+	if eventType != string(eventReactionAdded) ||
+		guildID != "guild-1" ||
+		channelID != "channel-1" ||
+		messageID != "message-1" ||
+		userID != "user-1" ||
+		emojiName != "thumbsup" {
+		t.Fatalf("unexpected reaction row: type=%q guild=%q channel=%q msg=%q user=%q emoji=%q", eventType, guildID, channelID, messageID, userID, emojiName)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "message-1", string(eventReactionAdded)); got != 1 {
+		t.Fatalf("expected reaction_added lifecycle event count=1, got %d", got)
+	}
+}
+
+func TestHandleMessageReactionRemove_PersistsWhenLogsHidden(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+		setLiveReactionLogsEnabled(true)
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveReactionLogsEnabled(false)
+	out := captureStdout(t, func() {
+		handleMessageReactionRemove(nil, db, stmts, &discordgo.MessageReactionRemove{
+			MessageReaction: &discordgo.MessageReaction{
+				UserID:    "user-1",
+				MessageID: "message-1",
+				ChannelID: "channel-1",
+				GuildID:   "guild-1",
+				Emoji: discordgo.Emoji{
+					ID:       "emoji-1",
+					Name:     "party",
+					Animated: true,
+				},
+			},
+		})
+	})
+
+	if strings.Contains(out, "Event: reaction_removed\n") {
+		t.Fatalf("expected hidden reaction logs to suppress stdout, got %q", out)
+	}
+
+	var eventType, emojiID string
+	var emojiAnimated int
+	if err := db.QueryRow(`
+SELECT event_type, emoji_id, emoji_animated
+FROM reactions
+WHERE message_id = ? AND user_id = ?;`, "message-1", "user-1").Scan(&eventType, &emojiID, &emojiAnimated); err != nil {
+		t.Fatalf("query reaction failed: %v", err)
+	}
+	if eventType != string(eventReactionRemoved) || emojiID != "emoji-1" || emojiAnimated != 1 {
+		t.Fatalf("unexpected reaction row: type=%q emoji_id=%q animated=%d", eventType, emojiID, emojiAnimated)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "message-1", string(eventReactionRemoved)); got != 1 {
+		t.Fatalf("expected reaction_removed lifecycle event count=1, got %d", got)
+	}
+}
+
 func TestLiveMessageLogSeparatorsStartAfterEnabled(t *testing.T) {
 	t.Cleanup(func() {
 		setTrackedEventLoggingEnabled(false)

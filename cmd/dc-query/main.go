@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,7 +18,7 @@ import (
 	"example.org/dc-logger/internal/querysvc"
 )
 
-var usageText = fmt.Sprintf(`dc-query: read-only query helper for dc-logger SQLite data
+var usageText = `dc-query: read-only query helper for dc-logger SQLite data
 
 Usage:
   dc-query <command> [flags]
@@ -43,7 +45,6 @@ Commands:
   json-request                Read one JSON request object (stdin or --input file).
 
 Common flags:
-  --db <path>          SQLite database path (default: %s or %s)
   --guild-id <id>      Guild ID filter (optional; defaults to most common guild in DB)
   --guild-name <name>  Guild name filter (optional alternative to --guild-id)
   --limit <n>          Max returned rows, clamped to [1,100] (default: 10)
@@ -59,7 +60,6 @@ JSON request mode:
 
   Request JSON fields:
     command    string (required; accepts both kebab-case and snake_case)
-    db         string (optional)
     guild_id   string (optional)
     guild_name string (optional; alternative to guild_id)
     channel_id string (required for recent-messages-in-channel)
@@ -99,7 +99,7 @@ Examples:
   dc-query channel-activity-summary --since 2026-01-01T00:00:00Z --limit 10
   dc-query keyword-frequency --since 2026-01-01T00:00:00Z --min-length 5 --limit 20
   printf '{"command":"search_messages","query":"incident","limit":5}' | dc-query json-request
-`, config.EnvDiscordLogDB, config.DefaultLogDBPath)
+`
 
 const (
 	codeInternal            = "internal"
@@ -132,7 +132,6 @@ type response struct {
 
 type request struct {
 	Command      string   `json:"command"`
-	DBPath       string   `json:"db,omitempty"`
 	GuildID      string   `json:"guild_id,omitempty"`
 	GuildName    string   `json:"guild_name,omitempty"`
 	ChannelID    string   `json:"channel_id,omitempty"`
@@ -251,7 +250,6 @@ func runRecentMessages(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:      "recent-messages",
-		DBPath:       common.dbPath,
 		GuildID:      common.guildID,
 		GuildName:    common.guildName,
 		Since:        common.since,
@@ -281,7 +279,6 @@ func runRecentMessagesInChannel(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:      "recent-messages-in-channel",
-		DBPath:       common.dbPath,
 		GuildID:      common.guildID,
 		GuildName:    common.guildName,
 		ChannelID:    *channelID,
@@ -305,7 +302,6 @@ func runListServerMembers(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:   "list-server-members",
-		DBPath:    common.dbPath,
 		GuildID:   common.guildID,
 		GuildName: common.guildName,
 		Limit:     common.limit,
@@ -330,7 +326,6 @@ func runRecentMessagesByUser(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:      "recent-messages-by-user",
-		DBPath:       common.dbPath,
 		GuildID:      common.guildID,
 		GuildName:    common.guildName,
 		AuthorID:     *authorID,
@@ -362,7 +357,6 @@ func runLastMessageByUser(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:      "last-message-by-user",
-		DBPath:       common.dbPath,
 		GuildID:      common.guildID,
 		GuildName:    common.guildName,
 		AuthorID:     *authorID,
@@ -389,7 +383,6 @@ func runRolesOfUser(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:    "roles-of-user",
-		DBPath:     common.dbPath,
 		GuildID:    common.guildID,
 		GuildName:  common.guildName,
 		AuthorID:   *authorID,
@@ -416,7 +409,6 @@ func runUsersWithRole(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:   "users-with-role",
-		DBPath:    common.dbPath,
 		GuildID:   common.guildID,
 		GuildName: common.guildName,
 		RoleID:    *roleID,
@@ -443,7 +435,6 @@ func runRecentPingsByUser(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:    "recent-pings-by-user",
-		DBPath:     common.dbPath,
 		GuildID:    common.guildID,
 		GuildName:  common.guildName,
 		AuthorID:   *authorID,
@@ -470,7 +461,6 @@ func runRecentPingsTargetingUser(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:    "recent-pings-targeting-user",
-		DBPath:     common.dbPath,
 		GuildID:    common.guildID,
 		GuildName:  common.guildName,
 		TargetID:   *targetID,
@@ -497,7 +487,6 @@ func runUnansweredPingsTargetingUser(args []string, stdout, stderr io.Writer) in
 
 	req := request{
 		Command:    "unanswered-pings-targeting-user",
-		DBPath:     common.dbPath,
 		GuildID:    common.guildID,
 		GuildName:  common.guildName,
 		TargetID:   *targetID,
@@ -528,7 +517,6 @@ func runLastPingedUserByUser(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:    "last-pinged-user-by-user",
-		DBPath:     common.dbPath,
 		GuildID:    common.guildID,
 		GuildName:  common.guildName,
 		AuthorID:   *authorID,
@@ -551,7 +539,6 @@ func runRecentEvents(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:     "recent-events",
-		DBPath:      common.dbPath,
 		GuildID:     common.guildID,
 		GuildName:   common.guildName,
 		EventType:   *eventType,
@@ -581,7 +568,6 @@ func runSearchMessages(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:      "search-messages",
-		DBPath:       common.dbPath,
 		GuildID:      common.guildID,
 		GuildName:    common.guildName,
 		Query:        *searchQuery,
@@ -608,7 +594,6 @@ func runTopicActivitySummary(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:      "topic-activity-summary",
-		DBPath:       common.dbPath,
 		GuildID:      common.guildID,
 		GuildName:    common.guildName,
 		Query:        *searchQuery,
@@ -630,7 +615,6 @@ func runServerActivitySummary(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:   "server-activity-summary",
-		DBPath:    common.dbPath,
 		GuildID:   common.guildID,
 		GuildName: common.guildName,
 		Since:     common.since,
@@ -649,7 +633,6 @@ func runChannelActivitySummary(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:   "channel-activity-summary",
-		DBPath:    common.dbPath,
 		GuildID:   common.guildID,
 		GuildName: common.guildName,
 		Since:     common.since,
@@ -668,7 +651,6 @@ func runAuthorActivitySummary(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:   "author-activity-summary",
-		DBPath:    common.dbPath,
 		GuildID:   common.guildID,
 		GuildName: common.guildName,
 		Since:     common.since,
@@ -689,7 +671,6 @@ func runKeywordFrequency(args []string, stdout, stderr io.Writer) int {
 
 	req := request{
 		Command:   "keyword-frequency",
-		DBPath:    common.dbPath,
 		GuildID:   common.guildID,
 		GuildName: common.guildName,
 		Since:     common.since,
@@ -738,18 +719,18 @@ func executeRequest(req request) (response, error) {
 		return response{}, err
 	}
 
-	dbPath := strings.TrimSpace(req.DBPath)
-	if dbPath == "" {
-		dbPath = defaultDBPath()
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+
+	dbPath, err := resolveDBPath(ctx, req)
+	if err != nil {
+		return response{}, err
 	}
 	svc, err := querysvc.Open(dbPath)
 	if err != nil {
 		return response{}, withCode(codeOpenDBFailed, fmt.Sprintf("failed opening database %q", dbPath), err)
 	}
 	defer func() { _ = svc.Close() }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
-	defer cancel()
 
 	guildID, err := resolveGuildID(ctx, svc, req)
 	if err != nil {
@@ -1187,7 +1168,6 @@ func decodeJSONRequest(inputPath string, stdin io.Reader) (request, error) {
 }
 
 type commonFlags struct {
-	dbPath       string
 	guildID      string
 	guildName    string
 	since        string
@@ -1203,7 +1183,6 @@ func newCommonFlagSet(name string) (*flag.FlagSet, *commonFlags) {
 	cfg := &commonFlags{}
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&cfg.dbPath, "db", defaultDBPath(), "sqlite database path")
 	fs.StringVar(&cfg.guildID, "guild-id", "", "guild id (optional)")
 	fs.StringVar(&cfg.guildName, "guild-name", "", "guild name (optional)")
 	fs.StringVar(&cfg.since, "since", "", "inclusive lower RFC3339 timestamp filter")
@@ -1216,11 +1195,79 @@ func newCommonFlagSet(name string) (*flag.FlagSet, *commonFlags) {
 	return fs, cfg
 }
 
-func defaultDBPath() string {
-	if v := strings.TrimSpace(os.Getenv(config.EnvDiscordLogDB)); v != "" {
-		return v
+func resolveDBPath(ctx context.Context, req request) (string, error) {
+	paths := defaultDBPaths()
+	if len(paths) == 0 {
+		return "", withCode(codeOpenDBFailed, fmt.Sprintf("no .db files found in %s", config.DefaultDatabaseDir), nil)
 	}
-	return config.DefaultLogDBPath
+
+	guildID := strings.TrimSpace(req.GuildID)
+	if guildID != "" {
+		matches := make([]string, 0, 1)
+		for _, path := range paths {
+			if strings.HasSuffix(strings.TrimSuffix(filepath.Base(path), ".db"), "_"+guildID) {
+				matches = append(matches, path)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0], nil
+		}
+		if len(matches) > 1 {
+			return "", withCode(codeOpenDBFailed, fmt.Sprintf("multiple database files matched guild id %q", guildID), nil)
+		}
+		return "", withCode(codeOpenDBFailed, fmt.Sprintf("no database file matched guild id %q in %s", guildID, config.DefaultDatabaseDir), nil)
+	}
+
+	guildName := strings.TrimSpace(req.GuildName)
+	if guildName != "" {
+		matches, err := databasePathsForGuildName(ctx, paths, guildName)
+		if err != nil {
+			return "", err
+		}
+		if len(matches) == 1 {
+			return matches[0], nil
+		}
+		if len(matches) > 1 {
+			return "", withCode(codeOpenDBFailed, fmt.Sprintf("multiple database files matched guild name %q", guildName), nil)
+		}
+		return "", withCode(codeOpenDBFailed, fmt.Sprintf("no database file matched guild name %q in %s", guildName, config.DefaultDatabaseDir), nil)
+	}
+
+	if len(paths) == 1 {
+		return paths[0], nil
+	}
+	return "", withCode(codeOpenDBFailed, fmt.Sprintf("multiple database files found in %s; pass --guild-id or --guild-name", config.DefaultDatabaseDir), nil)
+}
+
+func defaultDBPaths() []string {
+	matches, err := filepath.Glob(filepath.Join(config.DefaultDatabaseDir, "*.db"))
+	if err != nil {
+		return nil
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+func databasePathsForGuildName(ctx context.Context, paths []string, guildName string) ([]string, error) {
+	var matches []string
+	for _, path := range paths {
+		svc, err := querysvc.Open(path)
+		if err != nil {
+			return nil, withCode(codeOpenDBFailed, fmt.Sprintf("failed opening database %q", path), err)
+		}
+		resolved, resolveErr := svc.ResolveGuildIDByName(ctx, guildName)
+		closeErr := svc.Close()
+		if resolveErr != nil {
+			return nil, withCode(codeGuildResolution, fmt.Sprintf("failed resolving guild name from database %q", path), resolveErr)
+		}
+		if closeErr != nil {
+			return nil, withCode(codeOpenDBFailed, fmt.Sprintf("failed closing database %q", path), closeErr)
+		}
+		if strings.TrimSpace(resolved) != "" {
+			matches = append(matches, path)
+		}
+	}
+	return matches, nil
 }
 
 func requireNonEmpty(name, value string) error {
