@@ -91,6 +91,7 @@ func TestRenderMessageEventLogWithServer_FirstLine(t *testing.T) {
 		"2026-03-02, 04:28:15 PM",
 		"",
 		false,
+		"",
 	)
 
 	want := "" +
@@ -115,6 +116,7 @@ func TestRenderMessageModifiedEventLog_ColorsOldAndNewContent(t *testing.T) {
 		"2026-03-02, 04:28:15 PM",
 		"before edit",
 		true,
+		"",
 	)
 
 	want := "" +
@@ -139,6 +141,7 @@ func TestRenderMessageDeletedEventLog_ColorsMessageContent(t *testing.T) {
 		"2026-03-02, 04:28:15 PM",
 		"",
 		false,
+		"",
 	)
 
 	want := "" +
@@ -163,6 +166,7 @@ func TestRenderReactionEventLog_UsesMessageURL(t *testing.T) {
 		"2026-03-02, 04:28:15 PM",
 		"",
 		false,
+		"👍",
 	)
 
 	want := "" +
@@ -172,9 +176,30 @@ func TestRenderReactionEventLog_UsesMessageURL(t *testing.T) {
 		"Thread: #thread\n" +
 		"Channel: #general\n" +
 		"Message: https://discord.com/channels/guild-1/thread-1/message-1\n" +
+		"Reaction: 👍\n" +
 		"Time: 2026-03-02, 04:28:15 PM\n\n"
 	if got != want {
 		t.Fatalf("formatted reaction_added log mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
+func TestReactionDisplayString(t *testing.T) {
+	cases := []struct {
+		name     string
+		emojiID  string
+		emojiNm  string
+		want     string
+	}{
+		{"unicode", "", "👍", "👍"},
+		{"custom", "12345", "blobwave", ":blobwave:"},
+		{"animated_custom", "67890", "partyparrot", ":partyparrot:"},
+		{"unicode_empty", "", "", "<unknown>"},
+		{"custom_no_name", "abc", "", ":abc:"},
+	}
+	for _, tc := range cases {
+		if got := reactionDisplayString(tc.emojiID, tc.emojiNm); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

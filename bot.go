@@ -1384,11 +1384,30 @@ func handleMessageReaction(
 	}
 
 	logTrackedEvent(eventType, r.GuildID, r.ChannelID, r.MessageID, r.UserID, payload)
-	logReactionEvent(s, db, eventType, r.GuildID, r.ChannelID, r.MessageID, userName, msgURL, now)
+	reactionDisplay := reactionDisplayString(emojiID, emojiName)
+	logReactionEvent(s, db, eventType, r.GuildID, r.ChannelID, r.MessageID, userName, msgURL, reactionDisplay, now)
 }
 
 func reactionEmojiFields(e discordgo.Emoji) (id, name string, animated bool) {
 	return strings.TrimSpace(e.ID), strings.TrimSpace(e.Name), e.Animated
+}
+
+// reactionDisplayString returns a terminal-friendly representation of a reaction
+// emoji. Unicode emojis are returned verbatim (Name holds the unicode glyph).
+// Custom guild emojis can't be rendered as glyphs in the terminal, so we return
+// the Discord-style :name: form instead.
+func reactionDisplayString(emojiID, emojiName string) string {
+	name := strings.TrimSpace(emojiName)
+	if emojiID == "" {
+		if name == "" {
+			return "<unknown>"
+		}
+		return name
+	}
+	if name == "" {
+		return ":" + emojiID + ":"
+	}
+	return ":" + name + ":"
 }
 
 func reactionUserDisplayName(s *discordgo.Session, db *sql.DB, guildID, userID string, member *discordgo.Member) string {
@@ -2223,7 +2242,7 @@ func logMessageSentEvent(
 	db *sql.DB,
 	guildID, channelID, messageID, senderName, content, createdAt string,
 ) {
-	logMessageEvent(s, db, "message_sent", guildID, channelID, messageID, senderName, content, createdAt, "", false)
+	logMessageEvent(s, db, "message_sent", guildID, channelID, messageID, senderName, content, createdAt, "", false, "")
 }
 
 func logMessageDeletedEvent(
@@ -2231,7 +2250,7 @@ func logMessageDeletedEvent(
 	db *sql.DB,
 	guildID, channelID, messageID, senderName, content, deletedAt string,
 ) {
-	logMessageEvent(s, db, "message_deleted", guildID, channelID, messageID, senderName, content, deletedAt, "", false)
+	logMessageEvent(s, db, "message_deleted", guildID, channelID, messageID, senderName, content, deletedAt, "", false, "")
 }
 
 func logMessageModifiedEvent(
@@ -2240,19 +2259,19 @@ func logMessageModifiedEvent(
 	guildID, channelID, messageID, senderName, oldContent, newContent, modifiedAt string,
 	hasOldContent bool,
 ) {
-	logMessageEvent(s, db, "message_modified", guildID, channelID, messageID, senderName, newContent, modifiedAt, oldContent, hasOldContent)
+	logMessageEvent(s, db, "message_modified", guildID, channelID, messageID, senderName, newContent, modifiedAt, oldContent, hasOldContent, "")
 }
 
 func logReactionEvent(
 	s *discordgo.Session,
 	db *sql.DB,
 	eventType lifecycleEventType,
-	guildID, channelID, messageID, userName, messageURL, eventAt string,
+	guildID, channelID, messageID, userName, messageURL, reactionDisplay, eventAt string,
 ) {
 	if !liveReactionLogsEnabled.Load() {
 		return
 	}
-	logMessageEvent(s, db, string(eventType), guildID, channelID, messageID, userName, messageURL, eventAt, "", false)
+	logMessageEvent(s, db, string(eventType), guildID, channelID, messageID, userName, messageURL, eventAt, "", false, reactionDisplay)
 }
 
 func logMessageEvent(
@@ -2261,6 +2280,7 @@ func logMessageEvent(
 	eventType, guildID, channelID, messageID, senderName, content, eventAt string,
 	oldContent string,
 	hasOldContent bool,
+	reactionDisplay string,
 ) {
 	if !trackedEventLoggingEnabled.Load() {
 		return
@@ -2301,6 +2321,7 @@ func logMessageEvent(
 		eventTime,
 		oldContent,
 		hasOldContent,
+		reactionDisplay,
 	)
 
 	liveMessageLogPrintMu.Lock()
@@ -2315,14 +2336,14 @@ func logMessageEvent(
 }
 
 func renderMessageSentEventLog(senderName, threadName, channelName, content, eventTime string) string {
-	return renderMessageEventLog("message_sent", senderName, threadName, channelName, content, eventTime, "", false)
+	return renderMessageEventLog("message_sent", senderName, threadName, channelName, content, eventTime, "", false, "")
 }
 
-func renderMessageEventLog(eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool) string {
-	return renderMessageEventLogWithServer("", eventType, senderName, threadName, channelName, content, eventTime, oldContent, hasOldContent)
+func renderMessageEventLog(eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool, reactionDisplay string) string {
+	return renderMessageEventLogWithServer("", eventType, senderName, threadName, channelName, content, eventTime, oldContent, hasOldContent, reactionDisplay)
 }
 
-func renderMessageEventLogWithServer(serverName, eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool) string {
+func renderMessageEventLogWithServer(serverName, eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool, reactionDisplay string) string {
 	serverLine := ""
 	if serverName = strings.TrimSpace(serverName); serverName != "" {
 		serverLine = fmt.Sprintf("Server: %s\n", serverName)
@@ -2331,19 +2352,24 @@ func renderMessageEventLogWithServer(serverName, eventType, senderName, threadNa
 	if strings.TrimSpace(threadName) != "" {
 		locationLines = fmt.Sprintf("Thread: %s\nChannel: %s\n", threadName, channelName)
 	}
+	reactionLine := ""
+	if strings.TrimSpace(reactionDisplay) != "" {
+		reactionLine = fmt.Sprintf("Reaction: %s\n", reactionDisplay)
+	}
 	if hasOldContent {
 		if eventType == "message_modified" {
 			oldContent = colorizeTerminalText(oldContent, ansiLightRed)
 			content = colorizeTerminalText(content, ansiGreen)
 		}
 		return fmt.Sprintf(
-			"%sEvent: %s\nUser: %s\n%sOld Message: %s\nNew Message: %s\nTime: %s\n\n",
+			"%sEvent: %s\nUser: %s\n%sOld Message: %s\nNew Message: %s\n%sTime: %s\n\n",
 			serverLine,
 			eventType,
 			senderName,
 			locationLines,
 			oldContent,
 			content,
+			reactionLine,
 			eventTime,
 		)
 	}
@@ -2351,12 +2377,13 @@ func renderMessageEventLogWithServer(serverName, eventType, senderName, threadNa
 		content = colorizeTerminalText(content, ansiLightRed)
 	}
 	return fmt.Sprintf(
-		"%sEvent: %s\nUser: %s\n%sMessage: %s\nTime: %s\n\n",
+		"%sEvent: %s\nUser: %s\n%sMessage: %s\n%sTime: %s\n\n",
 		serverLine,
 		eventType,
 		senderName,
 		locationLines,
 		content,
+		reactionLine,
 		eventTime,
 	)
 }

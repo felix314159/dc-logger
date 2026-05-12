@@ -395,7 +395,8 @@ func TestHandleMessageReactionAdd_PersistsReactionAndLifecycleEvent(t *testing.T
 	if !strings.Contains(out, "Event: reaction_added\n") ||
 		!strings.Contains(out, "User: Alice\n") ||
 		!strings.Contains(out, "Channel: #channel-1\n") ||
-		!strings.Contains(out, "Message: https://discord.com/channels/guild-1/channel-1/message-1\n") {
+		!strings.Contains(out, "Message: https://discord.com/channels/guild-1/channel-1/message-1\n") ||
+		!strings.Contains(out, "Reaction: thumbsup\n") {
 		t.Fatalf("reaction log missing expected fields, got %q", out)
 	}
 
