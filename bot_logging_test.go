@@ -183,6 +183,32 @@ func TestRenderReactionEventLog_UsesMessageURL(t *testing.T) {
 	}
 }
 
+func TestRenderReactionRemovedEventLog_ColorsReaction(t *testing.T) {
+	got := renderMessageEventLogWithServer(
+		"",
+		"reaction_removed",
+		"lorem",
+		"",
+		"#general",
+		"https://discord.com/channels/guild-1/channel-1/message-1",
+		"2026-03-02, 04:28:15 PM",
+		"",
+		false,
+		":blobwave:",
+	)
+
+	want := "" +
+		"Event: reaction_removed\n" +
+		"User: lorem\n" +
+		"Channel: #general\n" +
+		"Message: https://discord.com/channels/guild-1/channel-1/message-1\n" +
+		"Reaction: " + ansiLightRed + ":blobwave:" + ansiReset + "\n" +
+		"Time: 2026-03-02, 04:28:15 PM\n\n"
+	if got != want {
+		t.Fatalf("formatted reaction_removed log mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
 func TestReactionDisplayString(t *testing.T) {
 	cases := []struct {
 		name     string

@@ -2354,6 +2354,9 @@ func renderMessageEventLogWithServer(serverName, eventType, senderName, threadNa
 	}
 	reactionLine := ""
 	if strings.TrimSpace(reactionDisplay) != "" {
+		if eventType == string(eventReactionRemoved) {
+			reactionDisplay = colorizeTerminalText(reactionDisplay, ansiLightRed)
+		}
 		reactionLine = fmt.Sprintf("Reaction: %s\n", reactionDisplay)
 	}
 	if hasOldContent {
