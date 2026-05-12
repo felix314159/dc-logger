@@ -202,7 +202,7 @@ func TestRenderReactionRemovedEventLog_ColorsReaction(t *testing.T) {
 		"User: lorem\n" +
 		"Channel: #general\n" +
 		"Message: https://discord.com/channels/guild-1/channel-1/message-1\n" +
-		"Reaction: " + ansiLightRed + ":blobwave:" + ansiReset + "\n" +
+		ansiLightRed + "Reaction: :blobwave:" + ansiReset + "\n" +
 		"Time: 2026-03-02, 04:28:15 PM\n\n"
 	if got != want {
 		t.Fatalf("formatted reaction_removed log mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
