@@ -17,20 +17,7 @@ func main() {
 	}
 
 	dbPath := getenvDefault(config.EnvDiscordLogDB, config.DefaultLogDBPath)
-
-	db, err := openAndInitDB(dbPath)
-	if err != nil {
-		log.Fatalf("db init failed: %v", err)
-	}
-	defer db.Close()
-
-	stmts, err := prepareStatements(db)
-	if err != nil {
-		log.Fatalf("prepare statements failed: %v", err)
-	}
-	defer closePreparedStatements(stmts)
-
-	if err := runBot(token, dbPath, db, stmts); err != nil {
+	if err := runBot(token, dbPath); err != nil {
 		log.Fatalf("bot failed: %v", err)
 	}
 }

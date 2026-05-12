@@ -10,3 +10,10 @@ Use of this software is entirely at your own risk. The authors and contributors 
 ## Warning
 
 Entirely vibe-coded by Codex 5.3 and 5.5 Thinking, I did not write a single line of code. It seems to work well tho, lgtm LFG
+
+## Logging Multiple Server
+
+You can add the same bot to multiple servers and this tool will be able
+to log all servers at once. It will create a separate db file for each
+logged server, and the real-time logs will show the servername for each
+event if you are logging more than one server at the same time.

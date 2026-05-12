@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"path/filepath"
 	"testing"
 
 	"example.org/dc-logger/internal/config"
@@ -106,6 +107,14 @@ func TestResolveGuildDisplayName_UsesGuildDetailsFetcherFallback(t *testing.T) {
 	got := resolveGuildDisplayName(nil, nil, &discordgo.Guild{ID: "111111111111111111", Name: ""})
 	if got != "LOREM" {
 		t.Fatalf("resolveGuildDisplayName mismatch: got %q want %q", got, "LOREM")
+	}
+}
+
+func TestGuildDatabasePath_UsesReadableNameAndID(t *testing.T) {
+	got := guildDatabasePath(filepath.Join("database", "database.db"), "Example Server!/Ops", "12345")
+	want := filepath.Join("database", "db_Example_Server_Ops_12345.db")
+	if got != want {
+		t.Fatalf("guildDatabasePath mismatch: got %q want %q", got, want)
 	}
 }
 

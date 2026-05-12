@@ -34,6 +34,7 @@ const (
 
 var trackedEventLoggingEnabled atomic.Bool
 var liveMessageLogSeparatorsEnabled atomic.Bool
+var liveMessageLogServerNamesEnabled atomic.Bool
 
 var (
 	liveMessageLogPrintMu                       sync.Mutex
@@ -118,6 +119,29 @@ func resolveGuildDisplayName(s *discordgo.Session, db *sql.DB, g *discordgo.Guil
 
 	if guildName := strings.TrimSpace(g.Name); guildName != "" {
 		return guildName
+	}
+	if s != nil && s.State != nil {
+		if stateGuild, err := s.State.Guild(guildID); err == nil && stateGuild != nil {
+			if guildName := strings.TrimSpace(stateGuild.Name); guildName != "" {
+				return guildName
+			}
+		}
+	}
+	if fetchedGuild, err := guildDetailsFetcher(s, guildID); err == nil && fetchedGuild != nil {
+		if guildName := strings.TrimSpace(fetchedGuild.Name); guildName != "" {
+			return guildName
+		}
+	}
+	if mapped := currentMappedName(db, nameMappingEntityGuild, guildID, guildID); mapped != "" {
+		return mapped
+	}
+	return guildID
+}
+
+func resolveGuildDisplayNameByID(s *discordgo.Session, db *sql.DB, guildID string) string {
+	guildID = strings.TrimSpace(guildID)
+	if guildID == "" {
+		return ""
 	}
 	if s != nil && s.State != nil {
 		if stateGuild, err := s.State.Guild(guildID); err == nil && stateGuild != nil {
@@ -248,6 +272,14 @@ func preflightChannelPermissionLabel(db *sql.DB, guildID string, c *discordgo.Ch
 	return "#" + name
 }
 
+func guildDBForID(guildDBs *guildDatabaseRegistry, guildID string) *sql.DB {
+	entry := guildDBs.get(guildID)
+	if entry == nil {
+		return nil
+	}
+	return entry.db
+}
+
 func sortChannelsForPreview(db *sql.DB, guildID string, channels []*discordgo.Channel) {
 	sort.Slice(channels, func(i, j int) bool {
 		ci := channels[i]
@@ -264,7 +296,7 @@ func sortChannelsForPreview(db *sql.DB, guildID string, channels []*discordgo.Ch
 	})
 }
 
-func logChannelSyncPreview(s *discordgo.Session, db *sql.DB, guilds []*discordgo.Guild) map[string][]*discordgo.Channel {
+func logChannelSyncPreview(s *discordgo.Session, guildDBs *guildDatabaseRegistry, guilds []*discordgo.Guild) map[string][]*discordgo.Channel {
 	channelsByGuild := make(map[string][]*discordgo.Channel, len(guilds))
 
 	log.Println("detecting accessible channels before sync confirmation")
@@ -272,6 +304,7 @@ func logChannelSyncPreview(s *discordgo.Session, db *sql.DB, guilds []*discordgo
 		if g == nil || strings.TrimSpace(g.ID) == "" {
 			continue
 		}
+		db := guildDBForID(guildDBs, g.ID)
 		guildName := resolveGuildDisplayName(s, db, g)
 		channels, err := guildChannelsFetcher(s, g.ID)
 		if err != nil {
@@ -358,7 +391,7 @@ func logChannelSyncPreview(s *discordgo.Session, db *sql.DB, guilds []*discordgo
 	return channelsByGuild
 }
 
-func preflightGuildReadAccess(s *discordgo.Session, db *sql.DB, guilds []*discordgo.Guild, channelsByGuild map[string][]*discordgo.Channel) bool {
+func preflightGuildReadAccess(s *discordgo.Session, guildDBs *guildDatabaseRegistry, guilds []*discordgo.Guild, channelsByGuild map[string][]*discordgo.Channel) bool {
 	log.Println("running preflight read-access check before sync")
 	allClear := true
 	type accessFailure struct {
@@ -371,6 +404,7 @@ func preflightGuildReadAccess(s *discordgo.Session, db *sql.DB, guilds []*discor
 			continue
 		}
 		guildID := g.ID
+		db := guildDBForID(guildDBs, guildID)
 		guildName := resolveGuildDisplayName(s, db, g)
 		channels := channelsByGuild[guildID]
 
@@ -473,10 +507,9 @@ const (
 	memberRemovalCauseBanned memberRemovalCause = "banned"
 )
 
-func runBot(token, dbPath string, db *sql.DB, stmts *preparedStatements) error {
-	if err := ensureDatabaseFilePresent(dbPath); err != nil {
-		return fmt.Errorf("database file check failed: %w", err)
-	}
+func runBot(token, dbPath string) error {
+	guildDBs := newGuildDatabaseRegistry(dbPath)
+	defer guildDBs.close()
 
 	startupFatal := make(chan error, 1)
 	dg, err := newDiscordSession(token)
@@ -485,16 +518,11 @@ func runBot(token, dbPath string, db *sql.DB, stmts *preparedStatements) error {
 	}
 	defer dg.Close()
 
-	registerHandlers(dg, db, dbPath, stmts, startupFatal)
+	registerHandlers(dg, guildDBs, startupFatal)
 
 	if err := dg.Open(); err != nil {
 		return fmt.Errorf("failed to open websocket: %w", err)
 	}
-	stopDBMonitor := startDatabaseFileMonitor(dbPath, databaseFileMonitorTick, func(err error) {
-		log.Printf("database monitor detected missing file; aborting sync: %v", err)
-		notifyStartupFatal(startupFatal, fmt.Errorf("database file missing during runtime: %w", err))
-	})
-	defer stopDBMonitor()
 
 	log.Println("bot is running. press Ctrl+C to stop.")
 	if err := waitForShutdown(startupFatal); err != nil {
@@ -520,9 +548,7 @@ func newDiscordSession(token string) (*discordgo.Session, error) {
 
 func registerHandlers(
 	dg *discordgo.Session,
-	db *sql.DB,
-	dbPath string,
-	stmts *preparedStatements,
+	guildDBs *guildDatabaseRegistry,
 	startupFatal chan<- error,
 ) {
 	cfg := loadBackfillConfig()
@@ -532,6 +558,7 @@ func registerHandlers(
 	var activeBackfillMetrics atomic.Pointer[backfillMetrics]
 	setTrackedEventLoggingEnabled(false)
 	setLiveMessageLogSeparatorsEnabled(false)
+	setLiveMessageLogServerNamesEnabled(false)
 
 	dg.AddHandler(func(s *discordgo.Session, rl *discordgo.RateLimit) {
 		m := activeBackfillMetrics.Load()
@@ -561,7 +588,7 @@ func registerHandlers(
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("connected as %s#%s (user_id=%s)", r.User.Username, r.User.Discriminator, r.User.ID)
-		log.Printf("logging to sqlite: %s", dbPath)
+		log.Printf("sqlite database base path: %s", guildDBs.basePath)
 		log.Printf("guild sync filter: %s", guildFilter.describe())
 		log.Printf(
 			"startup backfill config: max_pages_per_run=%d max_backfill_minutes=%d",
@@ -577,7 +604,7 @@ func registerHandlers(
 			trackedReadyGuilds = append(trackedReadyGuilds, g)
 		}
 		log.Printf("ready guilds: total=%d tracked=%d", len(r.Guilds), len(trackedReadyGuilds))
-		log.Printf("syncing guilds: %s", describeTrackedReadyGuilds(s, db, trackedReadyGuilds))
+		log.Printf("syncing guilds: %s", describeTrackedReadyGuilds(s, nil, trackedReadyGuilds))
 		if guildFilter.allowAll {
 			if suggested := suggestedGuildIDEnvValue(trackedReadyGuilds); suggested != "" {
 				log.Printf(
@@ -592,20 +619,26 @@ func registerHandlers(
 			log.Println("no tracked guilds matched filter; sync remains disabled")
 			return
 		}
-		if err := ensureDatabaseFilePresent(dbPath); err != nil {
-			log.Printf("sync aborted: %v", err)
-			notifyStartupFatal(startupFatal, fmt.Errorf("database file missing before preflight: %w", err))
-			return
+
+		for _, g := range trackedReadyGuilds {
+			entry, err := guildDBs.openGuild(s, g)
+			if err != nil {
+				log.Printf("sync aborted: open sqlite for guild=%s failed: %v", g.ID, err)
+				notifyStartupFatal(startupFatal, fmt.Errorf("guild database open failed (guild=%s): %w", g.ID, err))
+				return
+			}
+			log.Printf("logging guild=%s (%s) to sqlite: %s", entry.guildName, entry.guildID, entry.path)
 		}
-		channelsByGuild := logChannelSyncPreview(s, db, trackedReadyGuilds)
-		if !preflightGuildReadAccess(s, db, trackedReadyGuilds, channelsByGuild) {
+		setLiveMessageLogServerNamesEnabled(len(trackedReadyGuilds) > 1)
+		guildDBs.startFileMonitor(databaseFileMonitorTick, func(err error) {
+			log.Printf("database monitor detected missing file; aborting sync: %v", err)
+			notifyStartupFatal(startupFatal, fmt.Errorf("database file missing during runtime: %w", err))
+		})
+
+		channelsByGuild := logChannelSyncPreview(s, guildDBs, trackedReadyGuilds)
+		if !preflightGuildReadAccess(s, guildDBs, trackedReadyGuilds, channelsByGuild) {
 			log.Println("sync aborted by preflight; terminating process")
 			notifyStartupFatal(startupFatal, fmt.Errorf("startup preflight failed: missing channel read access"))
-			return
-		}
-		if err := ensureDatabaseFilePresent(dbPath); err != nil {
-			log.Printf("sync aborted: %v", err)
-			notifyStartupFatal(startupFatal, fmt.Errorf("database file missing before startup sync: %w", err))
 			return
 		}
 		syncEnabled.Store(true)
@@ -619,7 +652,12 @@ func registerHandlers(
 			if g == nil || g.ID == "" {
 				continue
 			}
-			guildName := resolveGuildDisplayName(s, db, g)
+			entry := guildDBs.get(g.ID)
+			if entry == nil {
+				continue
+			}
+			guildName := resolveGuildDisplayName(s, entry.db, g)
+			stmts := entry.stmts
 			if err := upsertGuildName(stmts.upsertIDNameMapping, g.ID, guildName, now); err != nil {
 				logDBErr("guild name mapping upsert failed (guild=%s): %v", g.ID, err)
 			}
@@ -643,10 +681,14 @@ func registerHandlers(
 				if g == nil || g.ID == "" {
 					continue
 				}
-				guildName := resolveGuildDisplayName(s, db, g)
+				entry := guildDBs.get(g.ID)
+				if entry == nil {
+					continue
+				}
+				guildName := resolveGuildDisplayName(s, entry.db, g)
 				log.Printf("startup backfill begin guild=%s (%s)", guildName, g.ID)
 
-				if err := backfillGuild(s, db, stmts, g.ID, run); err != nil {
+				if err := backfillGuild(s, entry.db, entry.stmts, g.ID, run); err != nil {
 					if errors.Is(err, errBackfillBudgetReached) {
 						status = "paused_budget"
 						break
@@ -697,109 +739,151 @@ func registerHandlers(
 			logSkippedMessageCreate(m, "guild_filter_rejected")
 			return
 		}
-		handleMessageCreate(s, db, stmts, m)
+		entry := guildDBs.get(m.GuildID)
+		if entry == nil {
+			logSkippedMessageCreate(m, "guild_database_missing")
+			return
+		}
+		handleMessageCreate(s, entry.db, entry.stmts, m)
 	})
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageUpdate) {
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
 			return
 		}
-		handleMessageUpdate(s, db, stmts, m)
+		if entry := guildDBs.get(m.GuildID); entry != nil {
+			handleMessageUpdate(s, entry.db, entry.stmts, m)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageDelete) {
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
 			return
 		}
-		handleMessageDelete(s, db, stmts, m)
+		if entry := guildDBs.get(m.GuildID); entry != nil {
+			handleMessageDelete(s, entry.db, entry.stmts, m)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
 		if g == nil || !syncEnabled.Load() || !guildFilter.allows(g.ID) {
 			return
 		}
-		handleGuildCreate(stmts, g)
+		entry, err := guildDBs.openGuild(s, g.Guild)
+		if err != nil {
+			logDBErr("guild database open failed (guild=%s): %v", g.ID, err)
+			return
+		}
+		handleGuildCreate(entry.stmts, g)
 	})
 	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildUpdate) {
 		if g == nil || !syncEnabled.Load() || !guildFilter.allows(g.ID) {
 			return
 		}
-		handleGuildUpdate(db, stmts, g)
+		if entry := guildDBs.get(g.ID); entry != nil {
+			handleGuildUpdate(entry.db, entry.stmts, g)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.GuildRoleCreate) {
 		if r == nil || !syncEnabled.Load() || !guildFilter.allows(r.GuildID) {
 			return
 		}
-		handleGuildRoleCreate(stmts, r)
+		if entry := guildDBs.get(r.GuildID); entry != nil {
+			handleGuildRoleCreate(entry.stmts, r)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.GuildRoleUpdate) {
 		if r == nil || !syncEnabled.Load() || !guildFilter.allows(r.GuildID) {
 			return
 		}
-		handleGuildRoleUpdate(db, stmts, r)
+		if entry := guildDBs.get(r.GuildID); entry != nil {
+			handleGuildRoleUpdate(entry.db, entry.stmts, r)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.GuildRoleDelete) {
 		if r == nil || !syncEnabled.Load() || !guildFilter.allows(r.GuildID) {
 			return
 		}
-		handleGuildRoleDelete(stmts, r)
+		if entry := guildDBs.get(r.GuildID); entry != nil {
+			handleGuildRoleDelete(entry.stmts, r)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
 			return
 		}
-		handleGuildMemberAdd(stmts, m)
+		if entry := guildDBs.get(m.GuildID); entry != nil {
+			handleGuildMemberAdd(entry.stmts, m)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.GuildMemberUpdate) {
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
 			return
 		}
-		handleGuildMemberUpdate(db, stmts, m)
+		if entry := guildDBs.get(m.GuildID); entry != nil {
+			handleGuildMemberUpdate(entry.db, entry.stmts, m)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.GuildMemberRemove) {
 		if m == nil || !syncEnabled.Load() || !guildFilter.allows(m.GuildID) {
 			return
 		}
-		handleGuildMemberRemove(s, stmts, m)
+		if entry := guildDBs.get(m.GuildID); entry != nil {
+			handleGuildMemberRemove(s, entry.stmts, m)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, b *discordgo.GuildBanAdd) {
 		if b == nil || !syncEnabled.Load() || !guildFilter.allows(b.GuildID) {
 			return
 		}
-		handleGuildBanAdd(s, stmts, b)
+		if entry := guildDBs.get(b.GuildID); entry != nil {
+			handleGuildBanAdd(s, entry.stmts, b)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelCreate) {
 		if c == nil || !syncEnabled.Load() || !guildFilter.allows(c.GuildID) {
 			return
 		}
-		handleChannelCreate(stmts, c)
+		if entry := guildDBs.get(c.GuildID); entry != nil {
+			handleChannelCreate(entry.stmts, c)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelUpdate) {
 		if c == nil || !syncEnabled.Load() || !guildFilter.allows(c.GuildID) {
 			return
 		}
-		handleChannelUpdate(stmts, c)
+		if entry := guildDBs.get(c.GuildID); entry != nil {
+			handleChannelUpdate(entry.stmts, c)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelDelete) {
 		if c == nil || !syncEnabled.Load() || !guildFilter.allows(c.GuildID) {
 			return
 		}
-		handleChannelDelete(stmts, c)
+		if entry := guildDBs.get(c.GuildID); entry != nil {
+			handleChannelDelete(entry.stmts, c)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadCreate) {
 		if t == nil || !syncEnabled.Load() || !guildFilter.allows(t.GuildID) {
 			return
 		}
-		handleThreadCreate(stmts, t)
+		if entry := guildDBs.get(t.GuildID); entry != nil {
+			handleThreadCreate(entry.stmts, t)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadUpdate) {
 		if t == nil || !syncEnabled.Load() || !guildFilter.allows(t.GuildID) {
 			return
 		}
-		handleThreadUpdate(stmts, t)
+		if entry := guildDBs.get(t.GuildID); entry != nil {
+			handleThreadUpdate(entry.stmts, t)
+		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadDelete) {
 		if t == nil || !syncEnabled.Load() || !guildFilter.allows(t.GuildID) {
 			return
 		}
-		handleThreadDelete(stmts, t)
+		if entry := guildDBs.get(t.GuildID); entry != nil {
+			handleThreadDelete(entry.stmts, t)
+		}
 	})
 }
 
@@ -2053,7 +2137,12 @@ func logMessageEvent(
 		oldContent = replaceMentionsWithDisplayNames(s, db, guildID, oldContent)
 	}
 	eventTime := formatMessageSentTime(eventAt, messageID)
-	logText := renderMessageEventLog(
+	serverName := ""
+	if liveMessageLogServerNamesEnabled.Load() {
+		serverName = resolveGuildDisplayNameByID(s, db, guildID)
+	}
+	logText := renderMessageEventLogWithServer(
+		serverName,
 		eventType,
 		senderName,
 		threadName,
@@ -2080,6 +2169,14 @@ func renderMessageSentEventLog(senderName, threadName, channelName, content, eve
 }
 
 func renderMessageEventLog(eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool) string {
+	return renderMessageEventLogWithServer("", eventType, senderName, threadName, channelName, content, eventTime, oldContent, hasOldContent)
+}
+
+func renderMessageEventLogWithServer(serverName, eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool) string {
+	serverLine := ""
+	if serverName = strings.TrimSpace(serverName); serverName != "" {
+		serverLine = fmt.Sprintf("Server: %s\n", serverName)
+	}
 	locationLines := fmt.Sprintf("Channel: %s\n", channelName)
 	if strings.TrimSpace(threadName) != "" {
 		locationLines = fmt.Sprintf("Thread: %s\nChannel: %s\n", threadName, channelName)
@@ -2090,7 +2187,8 @@ func renderMessageEventLog(eventType, senderName, threadName, channelName, conte
 			content = colorizeTerminalText(content, ansiGreen)
 		}
 		return fmt.Sprintf(
-			"Event: %s\nUser: %s\n%sOld Message: %s\nNew Message: %s\nTime: %s\n\n",
+			"%sEvent: %s\nUser: %s\n%sOld Message: %s\nNew Message: %s\nTime: %s\n\n",
+			serverLine,
 			eventType,
 			senderName,
 			locationLines,
@@ -2103,7 +2201,8 @@ func renderMessageEventLog(eventType, senderName, threadName, channelName, conte
 		content = colorizeTerminalText(content, ansiLightRed)
 	}
 	return fmt.Sprintf(
-		"Event: %s\nUser: %s\n%sMessage: %s\nTime: %s\n\n",
+		"%sEvent: %s\nUser: %s\n%sMessage: %s\nTime: %s\n\n",
+		serverLine,
 		eventType,
 		senderName,
 		locationLines,
@@ -2384,6 +2483,10 @@ func setLiveMessageLogSeparatorsEnabled(enabled bool) {
 
 	liveMessageLogSeparatorsEnabled.Store(enabled)
 	liveMessageLogPrintedSinceSeparatorsEnabled = false
+}
+
+func setLiveMessageLogServerNamesEnabled(enabled bool) {
+	liveMessageLogServerNamesEnabled.Store(enabled)
 }
 
 func notifyStartupFatal(startupFatal chan<- error, err error) {

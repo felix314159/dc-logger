@@ -80,6 +80,31 @@ func TestRenderMessageSentEventLog_ThreadFormatting(t *testing.T) {
 	}
 }
 
+func TestRenderMessageEventLogWithServer_FirstLine(t *testing.T) {
+	got := renderMessageEventLogWithServer(
+		"Example Server",
+		"message_sent",
+		"ipsum",
+		"",
+		"#forum-lorem",
+		"summary text",
+		"2026-03-02, 04:28:15 PM",
+		"",
+		false,
+	)
+
+	want := "" +
+		"Server: Example Server\n" +
+		"Event: message_sent\n" +
+		"User: ipsum\n" +
+		"Channel: #forum-lorem\n" +
+		"Message: summary text\n" +
+		"Time: 2026-03-02, 04:28:15 PM\n\n"
+	if got != want {
+		t.Fatalf("formatted message_sent server log mismatch:\n--- got ---\n%q\n--- want ---\n%q", got, want)
+	}
+}
+
 func TestRenderMessageModifiedEventLog_ColorsOldAndNewContent(t *testing.T) {
 	got := renderMessageEventLog(
 		"message_modified",
