@@ -4,6 +4,7 @@ package main
 import (
 	"log"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,10 +42,14 @@ func parseNonNegativeIntEnv(key string, def int) int {
 }
 
 type backfillRun struct {
-	cfg          backfillConfig
-	metrics      *backfillMetrics
-	startedAt    time.Time
-	deadline     time.Time
+	cfg       backfillConfig
+	metrics   *backfillMetrics
+	startedAt time.Time
+	deadline  time.Time
+
+	// mu guards pagesUsed and budgetReason. Once the parallel reaction
+	// refresh phase kicks in, multiple goroutines can race here.
+	mu           sync.Mutex
 	pagesUsed    int
 	budgetReason string
 }
@@ -73,27 +78,38 @@ func (r *backfillRun) consumeBackfillPage() bool {
 	if r == nil {
 		return true
 	}
+	r.mu.Lock()
 	if r.cfg.maxPagesPerRun > 0 && r.pagesUsed >= r.cfg.maxPagesPerRun {
 		r.budgetReason = "max_pages_per_run"
+		r.mu.Unlock()
 		return false
 	}
 	if !r.deadline.IsZero() && time.Now().UTC().After(r.deadline) {
 		r.budgetReason = "max_backfill_minutes"
+		r.mu.Unlock()
 		return false
 	}
 	r.pagesUsed++
+	r.mu.Unlock()
 	r.noteRequest()
 	return true
 }
 
 func (r *backfillRun) budgetReached() bool {
-	return r != nil && r.budgetReason != ""
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.budgetReason != ""
 }
 
 func (r *backfillRun) reason() string {
 	if r == nil {
 		return ""
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.budgetReason
 }
 
@@ -101,6 +117,8 @@ func (r *backfillRun) usedPages() int {
 	if r == nil {
 		return 0
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.pagesUsed
 }
 

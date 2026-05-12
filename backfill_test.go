@@ -278,6 +278,24 @@ func TestBackfillGuild_ResumesFromLatestStoredMessageWhenStateMissing(t *testing
 				t.Fatalf("expected next incremental cursor after=600, got before=%q after=%q", beforeID, afterID)
 			}
 			return []*discordgo.Message{}, nil
+		case 3:
+			// Post-incremental reaction refresh pass walks recent messages
+			// from newest backward; return one in-window message with no
+			// reactions so the pass exits cleanly.
+			if afterID != "" {
+				t.Fatalf("refresh pass should not use afterID, got %q", afterID)
+			}
+			return []*discordgo.Message{
+				{
+					ID:        "600",
+					GuildID:   "guild-resume",
+					ChannelID: "channel-resume",
+					Timestamp: time.Now().UTC(),
+					Author:    &discordgo.User{ID: "user-new", Username: "new-user"},
+				},
+			}, nil
+		case 4:
+			return []*discordgo.Message{}, nil
 		default:
 			t.Fatalf("unexpected ChannelMessages call #%d", calls)
 			return nil, nil
@@ -683,6 +701,9 @@ func TestPersistBackfillMessage_DedupesAfterLiveReplay(t *testing.T) {
 func TestPersistBackfillMessage_BackfillsRecentReactionsWithDedup(t *testing.T) {
 	db, stmts := openTestDB(t)
 
+	backfillReactionsRecovered.Store(0)
+	t.Cleanup(func() { backfillReactionsRecovered.Store(0) })
+
 	prev := messageReactionsFetcher
 	calls := 0
 	messageReactionsFetcher = func(s *discordgo.Session, channelID, messageID, emojiAPI string, limit int, afterID string) ([]*discordgo.User, error) {
@@ -729,6 +750,9 @@ func TestPersistBackfillMessage_BackfillsRecentReactionsWithDedup(t *testing.T) 
 	if calls != 2 {
 		t.Fatalf("expected 2 reaction fetches, got %d", calls)
 	}
+	if got := backfillReactionsRecovered.Load(); got != 3 {
+		t.Fatalf("expected backfillReactionsRecovered=3 after first run, got %d", got)
+	}
 
 	var total int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg-rx").Scan(&total); err != nil {
@@ -746,6 +770,88 @@ func TestPersistBackfillMessage_BackfillsRecentReactionsWithDedup(t *testing.T) 
 	}
 	if total != 3 {
 		t.Fatalf("expected dedup to keep 3 reaction rows, got %d", total)
+	}
+	if got := backfillReactionsRecovered.Load(); got != 3 {
+		t.Fatalf("expected backfillReactionsRecovered to stay at 3 after dedup rerun, got %d", got)
+	}
+}
+
+func TestRefreshRecentReactionsForChannel_CapturesReactionsOnAlreadySyncedMessages(t *testing.T) {
+	db, stmts := openTestDB(t)
+	_ = db
+
+	backfillReactionsRecovered.Store(0)
+	t.Cleanup(func() { backfillReactionsRecovered.Store(0) })
+
+	now := time.Now().UTC()
+	recent := &discordgo.Message{
+		ID:        "msg-recent",
+		GuildID:   "guild-rx",
+		ChannelID: "channel-rx",
+		Timestamp: now.Add(-2 * time.Hour),
+		Author:    &discordgo.User{ID: "author-rx", Username: "author"},
+		Reactions: []*discordgo.MessageReactions{
+			{Count: 1, Emoji: &discordgo.Emoji{Name: "🌶️"}},
+		},
+	}
+	old := &discordgo.Message{
+		ID:        "msg-old",
+		GuildID:   "guild-rx",
+		ChannelID: "channel-rx",
+		Timestamp: now.Add(-(backfillReactionsWindow + time.Hour)),
+		Author:    &discordgo.User{ID: "author-rx", Username: "author"},
+		Reactions: []*discordgo.MessageReactions{
+			{Count: 1, Emoji: &discordgo.Emoji{Name: "👀"}},
+		},
+	}
+
+	prevFetcher := channelMessagesFetcher
+	pages := 0
+	channelMessagesFetcher = func(s *discordgo.Session, channelID string, limit int, beforeID, afterID, aroundID string) ([]*discordgo.Message, error) {
+		pages++
+		if channelID != "channel-rx" || afterID != "" {
+			t.Fatalf("unexpected channelMessagesFetcher call (channel=%q after=%q)", channelID, afterID)
+		}
+		switch beforeID {
+		case "":
+			return []*discordgo.Message{recent, old}, nil
+		default:
+			t.Fatalf("did not expect a second page once a message older than cutoff was seen (beforeID=%q)", beforeID)
+			return nil, nil
+		}
+	}
+	t.Cleanup(func() { channelMessagesFetcher = prevFetcher })
+
+	prevReactions := messageReactionsFetcher
+	reactionCalls := map[string]int{}
+	messageReactionsFetcher = func(s *discordgo.Session, channelID, messageID, emojiAPI string, limit int, afterID string) ([]*discordgo.User, error) {
+		reactionCalls[messageID+"|"+emojiAPI]++
+		if messageID == "msg-old" {
+			t.Fatalf("messageReactionsFetcher should never be invoked for old messages")
+		}
+		return []*discordgo.User{{ID: "user-x", Username: "x"}}, nil
+	}
+	t.Cleanup(func() { messageReactionsFetcher = prevReactions })
+
+	if reached := refreshRecentReactionsForChannel(nil, stmts, "guild-rx", "channel-rx", nil); reached {
+		t.Fatalf("did not expect a budget exhaustion")
+	}
+	if pages != 1 {
+		t.Fatalf("expected exactly 1 page fetched, got %d", pages)
+	}
+	if reactionCalls["msg-recent|🌶️"] != 1 {
+		t.Fatalf("expected reaction fetch for recent message, got calls=%v", reactionCalls)
+	}
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, "msg-recent").Scan(&total); err != nil {
+		t.Fatalf("count reactions failed: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected 1 reaction row for recent message, got %d", total)
+	}
+	if got := backfillReactionsRecovered.Load(); got != 1 {
+		t.Fatalf("expected backfillReactionsRecovered=1, got %d", got)
 	}
 }
 

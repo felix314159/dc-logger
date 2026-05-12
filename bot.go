@@ -725,6 +725,10 @@ func registerHandlers(
 				budgetReason,
 			)
 			log.Println("startup complete! backfill finished; realtime logging remains active")
+			fmt.Printf(
+				"backfill recovered %d reaction(s) that occurred while the bot was offline\n\n",
+				backfillReactionsRecovered.Swap(0),
+			)
 			fmt.Printf("%s\n\n", strings.Repeat(string('-'), 158))
 			setLiveMessageLogSeparatorsEnabled(true)
 		}()

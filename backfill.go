@@ -10,10 +10,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
+
+// backfillReactionsRecovered counts reactions newly persisted by
+// backfillRecentMessageReactions across all guilds during startup sync. The
+// bot startup handler reads and resets this once before transitioning to live
+// logging, so the bot can report how many offline-window reactions it caught.
+var backfillReactionsRecovered atomic.Int64
 
 var errBackfillBudgetReached = errors.New("backfill budget reached")
 var archivedThreadsPermissionNoticeOnce sync.Once
@@ -42,6 +49,15 @@ var channelMessagesFetcher = func(
 // skipped: a single REST roundtrip per emoji per message gets expensive at
 // scale, and reactions far in the past matter much less for forensic logs.
 const backfillReactionsWindow = 24 * time.Hour
+
+// reactionRefreshWorkers controls how many channels are processed in parallel
+// during the post-incremental reaction refresh phase. The bottleneck is the
+// per-channel rate-limit bucket on GET /channels/{c}/messages/{m}/reactions/{e}
+// (~1 request per ~3s), so the only way to speed up sync is to keep multiple
+// channels in flight at once. Discord's global rate limit (~50 req/s) and the
+// total number of busy channels per guild dwarf any reasonable worker count;
+// 4 is conservative and very effective in practice.
+const reactionRefreshWorkers = 4
 
 // messageReactionsFetcher is overridable for tests. It returns the users who
 // currently have the given reaction on a message. afterID drives pagination
@@ -236,6 +252,7 @@ func backfillGuild(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, 
 	}
 
 	missingAccessSkipped := 0
+	var incrementalReactionChannelIDs []string
 
 	for idx, c := range list {
 		if run != nil && run.budgetReached() {
@@ -270,6 +287,7 @@ func backfillGuild(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, 
 			fallbackThreadParentID = strings.TrimSpace(c.ParentID)
 		}
 
+		didIncremental := strings.TrimSpace(lastID) != ""
 		inserted, newMax, budgetReached, err := backfillChannel(
 			s,
 			db,
@@ -297,6 +315,9 @@ func backfillGuild(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, 
 				logDBErr("state write failed (channel=%s): %v", c.ID, err)
 			}
 		}
+		if didIncremental {
+			incrementalReactionChannelIDs = append(incrementalReactionChannelIDs, c.ID)
+		}
 
 		if run != nil && run.metrics != nil {
 			snap := run.metrics.snapshot()
@@ -320,6 +341,13 @@ func backfillGuild(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, 
 			"backfill skipped %d channel(s)/thread(s) due to missing access; grant View Channels + Read Message History in those channels to include them",
 			missingAccessSkipped,
 		)
+	}
+
+	if run == nil || !run.budgetReached() {
+		if n := len(incrementalReactionChannelIDs); n > 0 {
+			log.Printf("reaction refresh starting for %d incremental channel(s) (workers=%d)", n, reactionRefreshWorkers)
+			runParallelReactionRefresh(s, stmts, guildID, incrementalReactionChannelIDs, run)
+		}
 	}
 
 	return nil
@@ -358,9 +386,120 @@ func backfillChannel(
 ) (int, string, bool, error) {
 	lastSeenID = strings.TrimSpace(lastSeenID)
 	if lastSeenID == "" {
+		// Full history already walks every message, so reactions on anything
+		// within backfillReactionsWindow are handled inline.
 		return backfillChannelFullHistory(s, db, stmts, guildID, channelID, fallbackThreadParentID, run)
 	}
+	// Reaction refresh for incremental channels happens in a separate parallel
+	// phase after every channel has finished message-level backfill — see
+	// runParallelReactionRefresh — so we don't block one channel's bucket
+	// reset on another's.
 	return backfillChannelIncremental(s, db, stmts, guildID, channelID, lastSeenID, fallbackThreadParentID, run)
+}
+
+// runParallelReactionRefresh fans the per-channel reaction refresh out over
+// reactionRefreshWorkers goroutines. The slow path is Discord's per-channel
+// rate-limit bucket on the reactions endpoint, so keeping multiple channels
+// in flight is the main lever for fast sync. Each goroutine processes one
+// channel at a time, which leaves intra-channel calls serialized — that's
+// fine because they share a bucket and would serialize anyway.
+func runParallelReactionRefresh(
+	s *discordgo.Session,
+	stmts *preparedStatements,
+	guildID string,
+	channelIDs []string,
+	run *backfillRun,
+) {
+	if len(channelIDs) == 0 {
+		return
+	}
+	workers := reactionRefreshWorkers
+	if workers > len(channelIDs) {
+		workers = len(channelIDs)
+	}
+
+	queue := make(chan string, len(channelIDs))
+	for _, id := range channelIDs {
+		queue <- id
+	}
+	close(queue)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for channelID := range queue {
+				if run != nil && run.budgetReached() {
+					return
+				}
+				if refreshRecentReactionsForChannel(s, stmts, guildID, channelID, run) {
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// refreshRecentReactionsForChannel walks recent messages of one channel from
+// newest to oldest until it crosses backfillReactionsWindow, and triggers
+// reaction backfill on each. It returns true if the run's budget got
+// exhausted mid-pass.
+func refreshRecentReactionsForChannel(
+	s *discordgo.Session,
+	stmts *preparedStatements,
+	guildID, channelID string,
+	run *backfillRun,
+) bool {
+	if stmts == nil || stmts.insertReactionDedup == nil {
+		return false
+	}
+	cutoff := time.Now().UTC().Add(-backfillReactionsWindow)
+	beforeID := ""
+	for {
+		if run != nil && !run.consumeBackfillPage() {
+			return true
+		}
+		const pageSize = 100
+		msgs, err := channelMessagesFetcher(s, channelID, pageSize, beforeID, "", "")
+		if err != nil {
+			logDBErr("reaction refresh ChannelMessages(channel=%s before=%s) failed: %v", channelID, beforeID, err)
+			return false
+		}
+		if len(msgs) == 0 {
+			return false
+		}
+		oldestTS := time.Time{}
+		oldestID := ""
+		anyInWindow := false
+		for _, m := range msgs {
+			if m == nil || m.ID == "" {
+				continue
+			}
+			if oldestID == "" || snowflakeGreater(oldestID, m.ID) {
+				oldestID = m.ID
+			}
+			if m.Timestamp.IsZero() {
+				continue
+			}
+			if oldestTS.IsZero() || m.Timestamp.Before(oldestTS) {
+				oldestTS = m.Timestamp
+			}
+			if m.Timestamp.Before(cutoff) {
+				continue
+			}
+			anyInWindow = true
+			if len(m.Reactions) == 0 {
+				continue
+			}
+			backfillRecentMessageReactions(s, stmts, guildID, channelID, m, normalizeTimestamp(m.Timestamp))
+		}
+		if oldestID == "" || (!oldestTS.IsZero() && oldestTS.Before(cutoff)) || !anyInWindow {
+			return false
+		}
+		beforeID = oldestID
+	}
 }
 
 func backfillChannelIncremental(
@@ -812,7 +951,7 @@ func backfillRecentMessageReactions(
 				if err := upsertGuildMemberRow(stmts.upsertGuildMember, guildID, u.ID, occurredAt); err != nil {
 					logDBErr("backfill reaction member upsert failed (guild=%s user=%s): %v", guildID, u.ID, err)
 				}
-				if _, err := stmts.insertReactionDedup.Exec(
+				res, err := stmts.insertReactionDedup.Exec(
 					guildID,
 					channelID,
 					m.ID,
@@ -826,8 +965,13 @@ func backfillRecentMessageReactions(
 					u.ID,
 					emojiID,
 					emojiName,
-				); err != nil {
+				)
+				if err != nil {
 					logDBErr("backfill reaction insert failed (msg=%s user=%s emoji=%s): %v", m.ID, u.ID, emojiAPI, err)
+					continue
+				}
+				if n, err := res.RowsAffected(); err == nil && n > 0 {
+					backfillReactionsRecovered.Add(n)
 				}
 			}
 			if len(users) < pageSize {
