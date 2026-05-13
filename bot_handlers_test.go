@@ -677,6 +677,173 @@ func TestHandleMessageCreate_PersistsMessageRelationshipFields(t *testing.T) {
 	}
 }
 
+func TestHandleMessageCreate_ThreadStarterLogsThreadCreatedInsteadOfMessageSent(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-thread",
+			Name: "Example Server",
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	setLiveMessageLogServerNamesEnabled(true)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+		setLiveMessageLogServerNamesEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "starter-message",
+				GuildID:   "guild-thread",
+				ChannelID: "thread-created-from-message",
+				Content:   "opening post",
+				Timestamp: time.Now().UTC(),
+				Author: &discordgo.User{
+					ID:       "user-thread",
+					Username: "alice",
+				},
+				Thread: &discordgo.Channel{
+					ID:       "thread-created-from-message",
+					GuildID:  "guild-thread",
+					ParentID: "forum-parent",
+					Name:     "new topic",
+					Type:     discordgo.ChannelTypeGuildPublicThread,
+				},
+			},
+		})
+	})
+
+	if got := mustCount(t, db, countMessagesByMessageIDQuery, "starter-message"); got != 1 {
+		t.Fatalf("starter message count mismatch: got %d want 1", got)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "starter-message", string(eventMessageSent)); got != 0 {
+		t.Fatalf("message_sent lifecycle count mismatch for thread starter: got %d want 0", got)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "starter-message", string(eventThreadCreated)); got != 1 {
+		t.Fatalf("thread_created lifecycle count mismatch for thread starter: got %d want 1", got)
+	}
+
+	var mappedName string
+	if err := db.QueryRow(
+		selectNameHumanByTypeEntityGuildQuery,
+		nameMappingEntityChannel, "thread-created-from-message", "guild-thread",
+	).Scan(&mappedName); err != nil {
+		t.Fatalf("query thread name mapping failed: %v", err)
+	}
+	if mappedName != "new topic" {
+		t.Fatalf("mapped thread name mismatch: got %q want %q", mappedName, "new topic")
+	}
+
+	var payloadJSON string
+	if err := db.QueryRow(
+		selectLifecyclePayloadByTypeAndMessageLatestQuery,
+		string(eventThreadCreated),
+		"starter-message",
+	).Scan(&payloadJSON); err != nil {
+		t.Fatalf("query thread_created event failed: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if payload["content"] != "opening post" || payload["starter_message_id"] != "starter-message" {
+		t.Fatalf("unexpected thread_created payload: %+v", payload)
+	}
+
+	if !strings.Contains(out, "Server: Example Server\n") ||
+		!strings.Contains(out, "Event: thread_created\n") ||
+		!strings.Contains(out, "User: alice\n") ||
+		!strings.Contains(out, "Thread: #new topic\n") ||
+		!strings.Contains(out, "Channel: #forum-parent\n") ||
+		!strings.Contains(out, "Message: opening post\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected thread_created stdout:\n%s", out)
+	}
+	if strings.Contains(out, "Event: message_sent\n") {
+		t.Fatalf("thread starter should not log message_sent stdout:\n%s", out)
+	}
+}
+
+func TestHandleMessageCreate_PendingThreadCreateLogsThreadCreatedInsteadOfMessageSent(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-thread-pending",
+			Name: "ffvv",
+		},
+	})
+	handleChannelCreate(nil, db, stmts, &discordgo.ChannelCreate{
+		Channel: &discordgo.Channel{
+			ID:      "forum-parent-pending",
+			GuildID: "guild-thread-pending",
+			Name:    "cc",
+			Type:    discordgo.ChannelTypeGuildForum,
+		},
+	})
+	handleThreadCreate(stmts, &discordgo.ThreadCreate{
+		Channel: &discordgo.Channel{
+			ID:       "pending-thread",
+			GuildID:  "guild-thread-pending",
+			ParentID: "forum-parent-pending",
+			Name:     "aa",
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+		},
+		NewlyCreated: true,
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	setLiveMessageLogServerNamesEnabled(true)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+		setLiveMessageLogServerNamesEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleMessageCreate(nil, db, stmts, &discordgo.MessageCreate{
+			Message: &discordgo.Message{
+				ID:        "pending-thread-message",
+				GuildID:   "guild-thread-pending",
+				ChannelID: "pending-thread",
+				Content:   "bb",
+				Timestamp: time.Now().UTC(),
+				Author: &discordgo.User{
+					ID:       "user-thread-pending",
+					Username: "alice",
+				},
+			},
+		})
+	})
+
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "pending-thread-message", string(eventMessageSent)); got != 0 {
+		t.Fatalf("message_sent lifecycle count mismatch for pending thread starter: got %d want 0", got)
+	}
+	if got := mustCount(t, db, countLifecycleByMessageAndTypeQuery, "pending-thread-message", string(eventThreadCreated)); got != 1 {
+		t.Fatalf("thread_created lifecycle count mismatch for pending thread starter: got %d want 1", got)
+	}
+
+	if !strings.Contains(out, "Server: ffvv\n") ||
+		!strings.Contains(out, "Event: thread_created\n") ||
+		!strings.Contains(out, "User: alice\n") ||
+		!strings.Contains(out, "Thread: #aa\n") ||
+		!strings.Contains(out, "Channel: #cc\n") ||
+		!strings.Contains(out, "Message: bb\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected pending thread_created stdout:\n%s", out)
+	}
+	if strings.Contains(out, "Event: message_sent\n") {
+		t.Fatalf("pending thread starter should not log message_sent stdout:\n%s", out)
+	}
+}
+
 func TestHandleMessageCreate_AttachmentOnlyPersistsRelationshipFields(t *testing.T) {
 	db, stmts := openTestDB(t)
 

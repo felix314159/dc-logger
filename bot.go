@@ -42,10 +42,75 @@ var (
 	liveMessageLogPrintedSinceSeparatorsEnabled bool
 )
 
+var pendingThreadCreates = newPendingThreadCreateTracker(30 * time.Minute)
+
 var (
 	messageLogUserMentionPattern = regexp.MustCompile(`<@!?([^>\s]+)>`)
 	messageLogRoleMentionPattern = regexp.MustCompile(`<@&([^>\s]+)>`)
 )
+
+type pendingThreadCreate struct {
+	channel  *discordgo.Channel
+	recorded time.Time
+}
+
+type pendingThreadCreateTracker struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	entries map[string]pendingThreadCreate
+}
+
+func newPendingThreadCreateTracker(ttl time.Duration) *pendingThreadCreateTracker {
+	return &pendingThreadCreateTracker{
+		ttl:     ttl,
+		entries: make(map[string]pendingThreadCreate),
+	}
+}
+
+func (t *pendingThreadCreateTracker) mark(guildID string, c *discordgo.Channel) {
+	if t == nil || c == nil {
+		return
+	}
+	guildID = strings.TrimSpace(guildID)
+	threadID := strings.TrimSpace(c.ID)
+	if guildID == "" || threadID == "" {
+		return
+	}
+	copied := *c
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.entries[guildID+"\x00"+threadID] = pendingThreadCreate{
+		channel:  &copied,
+		recorded: time.Now(),
+	}
+}
+
+func (t *pendingThreadCreateTracker) consume(guildID, threadID string) (*discordgo.Channel, bool) {
+	if t == nil {
+		return nil, false
+	}
+	guildID = strings.TrimSpace(guildID)
+	threadID = strings.TrimSpace(threadID)
+	if guildID == "" || threadID == "" {
+		return nil, false
+	}
+	key := guildID + "\x00" + threadID
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.entries[key]
+	if !ok {
+		return nil, false
+	}
+	delete(t.entries, key)
+	if t.ttl > 0 && time.Since(entry.recorded) > t.ttl {
+		return nil, false
+	}
+	if entry.channel == nil {
+		return nil, false
+	}
+	copied := *entry.channel
+	return &copied, true
+}
 
 type guildSyncFilter struct {
 	allowAll bool
@@ -964,6 +1029,17 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	if err := upsertChannelFromMessage(s, stmts.upsertChannel, stmts.upsertIDNameMapping, m.GuildID, m.ChannelID, now); err != nil {
 		logDBErr("channel upsert failed (channel=%s): %v", m.ChannelID, err)
 	}
+	createdThread := messageCreatedThread(m.Message)
+	if createdThread == nil {
+		if pendingThread, ok := pendingThreadCreates.consume(m.GuildID, m.ChannelID); ok {
+			createdThread = pendingThread
+		}
+	}
+	if createdThread != nil {
+		if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, m.GuildID, createdThread, now); err != nil {
+			logDBErr("thread upsert failed (thread=%s): %v", createdThread.ID, err)
+		}
+	}
 
 	authorID := ""
 	senderName := ""
@@ -1020,6 +1096,36 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		logDBErr("state update failed (channel=%s): %v", m.ChannelID, err)
 	}
 
+	logContent := messageSentLogContent(m.Content, attachmentLogContent)
+	if createdThread != nil {
+		threadID := strings.TrimSpace(createdThread.ID)
+		payload := channelEventPayload(createdThread)
+		payload["content"] = m.Content
+		payload["attachments_count"] = len(m.Attachments)
+		payload["embeds_count"] = len(m.Embeds)
+		payload["sender_name"] = senderName
+		payload["starter_message_id"] = m.ID
+		inserted, err := insertLifecycleEventByTypeAndMessageDedup(
+			stmts.insertEventByTypeMessageDedup,
+			eventThreadCreated,
+			m.GuildID,
+			threadID,
+			m.ID,
+			authorID,
+			createdAt,
+			payload,
+		)
+		if err != nil {
+			logDBErr("event insert failed (type=%s msg=%s): %v", eventThreadCreated, m.ID, err)
+			return
+		}
+		if !inserted {
+			return
+		}
+		logMessageEvent(s, db, string(eventThreadCreated), m.GuildID, m.ChannelID, m.ID, senderName, logContent, createdAt, "", false, "")
+		return
+	}
+
 	sentPayload := map[string]any{
 		"content":           m.Content,
 		"attachments_count": len(m.Attachments),
@@ -1043,7 +1149,6 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		return
 	}
 
-	logContent := messageSentLogContent(m.Content, attachmentLogContent)
 	logMessageSentEvent(s, db, m.GuildID, m.ChannelID, m.ID, senderName, logContent, createdAt)
 }
 
@@ -1183,6 +1288,40 @@ func insertMessageSentLifecycleEventDedup(
 		actorID,
 		occurredAt,
 		string(payloadJSON),
+		messageID,
+	)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+func insertLifecycleEventByTypeAndMessageDedup(
+	stmt *sql.Stmt,
+	eventType lifecycleEventType,
+	guildID, channelID, messageID, actorID, occurredAt string,
+	payload map[string]any,
+) (bool, error) {
+	if stmt == nil {
+		return false, fmt.Errorf("nil lifecycle event by type/message dedup statement")
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	res, err := stmt.Exec(
+		string(eventType),
+		guildID,
+		channelID,
+		messageID,
+		actorID,
+		occurredAt,
+		string(payloadJSON),
+		string(eventType),
 		messageID,
 	)
 	if err != nil {
@@ -2036,30 +2175,28 @@ func handleThreadCreate(stmts *preparedStatements, t *discordgo.ThreadCreate) {
 	if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, t.GuildID, t.Channel, now); err != nil {
 		logDBErr("thread upsert failed (thread=%s): %v", t.ID, err)
 	}
+	pendingThreadCreates.mark(t.GuildID, t.Channel)
+}
 
-	payload := channelEventPayload(t.Channel)
-	payload["newly_created"] = t.NewlyCreated
-	if err := recordLifecycleEvent(
-		stmts.insertEvent,
-		eventThreadCreated,
-		t.GuildID,
-		t.ID,
-		"",
-		"",
-		now,
-		payload,
-	); err != nil {
-		logDBErr("event insert failed (type=%s thread=%s): %v", eventThreadCreated, t.ID, err)
+func messageCreatedThread(m *discordgo.Message) *discordgo.Channel {
+	if m == nil || m.Thread == nil {
+		return nil
 	}
-
-	logTrackedEvent(
-		eventThreadCreated,
-		t.GuildID,
-		t.ID,
-		"",
-		"",
-		payload,
-	)
+	thread := m.Thread
+	threadID := strings.TrimSpace(thread.ID)
+	if threadID == "" {
+		threadID = strings.TrimSpace(m.ChannelID)
+	}
+	parentID := strings.TrimSpace(thread.ParentID)
+	if threadID == "" || (!thread.IsThread() && parentID == "") {
+		return nil
+	}
+	if thread.ID == threadID {
+		return thread
+	}
+	copied := *thread
+	copied.ID = threadID
+	return &copied
 }
 
 func handleThreadUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, t *discordgo.ThreadUpdate) {

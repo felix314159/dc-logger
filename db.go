@@ -18,6 +18,7 @@ type preparedStatements struct {
 	markAttachmentsDeletedByMessage *sql.Stmt
 	insertEvent                     *sql.Stmt
 	insertMessageSentEventDedup     *sql.Stmt
+	insertEventByTypeMessageDedup   *sql.Stmt
 	insertMessageUpdatedEventDedup  *sql.Stmt
 	upsertState                     *sql.Stmt
 	upsertChannel                   *sql.Stmt
@@ -143,6 +144,14 @@ func prepareStatements(db *sql.DB) (*preparedStatements, error) {
 		return nil, err
 	}
 	if err := prepare(
+		&stmts.insertEventByTypeMessageDedup,
+		insertLifecycleEventByTypeAndMessageDedupQuery,
+		"lifecycle event by type/message dedup insert",
+	); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err := prepare(
 		&stmts.insertMessageUpdatedEventDedup,
 		insertMessageUpdatedLifecycleEventDedupQuery,
 		"message_updated lifecycle event dedup insert",
@@ -178,6 +187,7 @@ func closePreparedStatements(stmts *preparedStatements) {
 	closeStmt("mark attachments deleted", stmts.markAttachmentsDeletedByMessage)
 	closeStmt("insert lifecycle event", stmts.insertEvent)
 	closeStmt("insert message_sent lifecycle event dedup", stmts.insertMessageSentEventDedup)
+	closeStmt("insert lifecycle event by type/message dedup", stmts.insertEventByTypeMessageDedup)
 	closeStmt("insert message_updated lifecycle event dedup", stmts.insertMessageUpdatedEventDedup)
 	closeStmt("upsert state", stmts.upsertState)
 	closeStmt("upsert channel", stmts.upsertChannel)
