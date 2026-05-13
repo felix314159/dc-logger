@@ -920,7 +920,7 @@ func registerHandlers(
 			return
 		}
 		if entry := guildDBs.get(t.GuildID); entry != nil {
-			handleThreadDelete(entry.stmts, t)
+			handleThreadDelete(s, entry.db, entry.stmts, t)
 		}
 	})
 }
@@ -2112,12 +2112,13 @@ func threadUpdateBeforeName(db *sql.DB, t *discordgo.ThreadUpdate) string {
 	return currentMappedName(db, nameMappingEntityChannel, t.ID, t.GuildID)
 }
 
-func handleThreadDelete(stmts *preparedStatements, t *discordgo.ThreadDelete) {
+func handleThreadDelete(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, t *discordgo.ThreadDelete) {
 	if t == nil || t.Channel == nil || t.GuildID == "" {
 		return
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	threadName := threadDeleteName(db, t)
 	if _, err := stmts.markChannelDeleted.Exec(now, now, t.ID); err != nil {
 		logDBErr("mark thread deleted failed (thread=%s): %v", t.ID, err)
 	}
@@ -2143,6 +2144,22 @@ func handleThreadDelete(stmts *preparedStatements, t *discordgo.ThreadDelete) {
 		"",
 		channelEventPayload(t.Channel),
 	)
+	logThreadDeletedEvent(s, db, t.GuildID, threadName, now)
+}
+
+func threadDeleteName(db *sql.DB, t *discordgo.ThreadDelete) string {
+	if t == nil {
+		return ""
+	}
+	if t.Channel != nil {
+		if name := strings.TrimSpace(t.Channel.Name); name != "" {
+			return name
+		}
+	}
+	if name := currentMappedName(db, nameMappingEntityChannel, t.ID, t.GuildID); name != "" {
+		return name
+	}
+	return strings.TrimSpace(t.ID)
 }
 
 func channelEventPayload(c *discordgo.Channel) map[string]any {
@@ -2365,6 +2382,19 @@ func logThreadRenamedEvent(
 	}
 	message := fmt.Sprintf("Thread was renamed from %s to %s", beforeName, afterName)
 	logLiveLifecycleEvent(serverName, eventThreadRenamed, message, eventAt)
+}
+
+func logThreadDeletedEvent(s *discordgo.Session, db *sql.DB, guildID, threadName, eventAt string) {
+	if !trackedEventLoggingEnabled.Load() {
+		return
+	}
+
+	serverName := resolveGuildDisplayNameByID(s, db, guildID)
+	if strings.TrimSpace(serverName) == "" {
+		serverName = guildID
+	}
+	message := fmt.Sprintf("Thread %s was deleted", threadName)
+	logLiveLifecycleEvent(serverName, eventThreadDeleted, message, eventAt)
 }
 
 func logChannelCreatedEvent(s *discordgo.Session, db *sql.DB, guildID, channelName, eventAt string) {

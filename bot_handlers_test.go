@@ -1517,6 +1517,138 @@ func TestHandleThreadUpdate_LogsRenameFromStoredNameWhenBeforeUpdateMissing(t *t
 	}
 }
 
+func TestHandleThreadDelete_LogsAndKeepsLocalBackupRows(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-10c",
+			Name: "Example Server",
+		},
+	})
+	handleThreadCreate(stmts, &discordgo.ThreadCreate{
+		Channel: &discordgo.Channel{
+			ID:       "thread-10c",
+			GuildID:  "guild-10c",
+			ParentID: "channel-parent",
+			Name:     "topic-a",
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+		},
+	})
+	if _, err := stmts.insertMsg.Exec(
+		"message-10c",
+		"guild-10c",
+		"thread-10c",
+		"user-10c",
+		"2026-03-02T16:28:15Z",
+		"keep me too",
+		"",
+		"",
+		"",
+		"thread-10c",
+		"channel-parent",
+	); err != nil {
+		t.Fatalf("seed thread message failed: %v", err)
+	}
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleThreadDelete(nil, db, stmts, &discordgo.ThreadDelete{
+			Channel: &discordgo.Channel{
+				ID:       "thread-10c",
+				GuildID:  "guild-10c",
+				ParentID: "channel-parent",
+				Name:     "topic-a",
+				Type:     discordgo.ChannelTypeGuildPublicThread,
+			},
+		})
+	})
+
+	if got := mustCount(t, db, countChannelsByChannelIDQuery, "thread-10c"); got != 1 {
+		t.Fatalf("thread row count mismatch after remote delete: got %d want 1", got)
+	}
+	if got := mustCount(t, db, countMessagesByChannelIDQuery, "thread-10c"); got != 1 {
+		t.Fatalf("thread message row count mismatch after remote delete: got %d want 1", got)
+	}
+
+	var deletedAt string
+	if err := db.QueryRow(`SELECT deleted_at FROM channels WHERE channel_id = ?;`, "thread-10c").Scan(&deletedAt); err != nil {
+		t.Fatalf("query thread deleted_at failed: %v", err)
+	}
+	if strings.TrimSpace(deletedAt) == "" {
+		t.Fatal("expected thread deleted_at to be set")
+	}
+
+	var payloadJSON string
+	if err := db.QueryRow(
+		selectLifecyclePayloadByTypeGuildChannelLatestQuery,
+		string(eventThreadDeleted), "guild-10c", "thread-10c",
+	).Scan(&payloadJSON); err != nil {
+		t.Fatalf("query thread delete event failed: %v", err)
+	}
+	if strings.TrimSpace(payloadJSON) == "" {
+		t.Fatal("expected thread delete payload")
+	}
+
+	if !strings.Contains(out, "Server: Example Server\n") ||
+		!strings.Contains(out, "Event: thread_deleted\n") ||
+		!strings.Contains(out, "Message: Thread topic-a was deleted\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected thread delete stdout:\n%s", out)
+	}
+}
+
+func TestHandleThreadDelete_LogsStoredNameWhenDeletePayloadOmitsName(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-10d",
+			Name: "Example Server",
+		},
+	})
+	handleThreadCreate(stmts, &discordgo.ThreadCreate{
+		Channel: &discordgo.Channel{
+			ID:       "1504064243811745902",
+			GuildID:  "guild-10d",
+			ParentID: "channel-parent",
+			Name:     "actual thread name",
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleThreadDelete(nil, db, stmts, &discordgo.ThreadDelete{
+			Channel: &discordgo.Channel{
+				ID:       "1504064243811745902",
+				GuildID:  "guild-10d",
+				ParentID: "channel-parent",
+				Type:     discordgo.ChannelTypeGuildPublicThread,
+			},
+		})
+	})
+
+	if !strings.Contains(out, "Message: Thread actual thread name was deleted\n") {
+		t.Fatalf("expected stored thread name in delete stdout, got:\n%s", out)
+	}
+	if strings.Contains(out, "Message: Thread 1504064243811745902 was deleted\n") {
+		t.Fatalf("thread delete stdout used numeric id instead of stored name:\n%s", out)
+	}
+}
+
 func TestHandleGuildMemberUpdate_LogsUsernameChangeAndUpdatesMapping(t *testing.T) {
 	db, stmts := openTestDB(t)
 
