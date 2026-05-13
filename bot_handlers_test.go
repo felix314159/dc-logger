@@ -1367,6 +1367,12 @@ func TestHandleChannelDelete_LogsAndKeepsLocalBackupRows(t *testing.T) {
 func TestHandleThreadUpdate_LogsRenameAndUpdatesMapping(t *testing.T) {
 	db, stmts := openTestDB(t)
 
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-10",
+			Name: "Example Server",
+		},
+	})
 	handleThreadCreate(stmts, &discordgo.ThreadCreate{
 		Channel: &discordgo.Channel{
 			ID:       "thread-1",
@@ -1377,22 +1383,42 @@ func TestHandleThreadUpdate_LogsRenameAndUpdatesMapping(t *testing.T) {
 		},
 	})
 
-	handleThreadUpdate(stmts, &discordgo.ThreadUpdate{
-		Channel: &discordgo.Channel{
-			ID:       "thread-1",
-			GuildID:  "guild-10",
-			ParentID: "channel-parent",
-			Name:     "topic-b",
-			Type:     discordgo.ChannelTypeGuildPublicThread,
-		},
-		BeforeUpdate: &discordgo.Channel{
-			ID:       "thread-1",
-			GuildID:  "guild-10",
-			ParentID: "channel-parent",
-			Name:     "topic-a",
-			Type:     discordgo.ChannelTypeGuildPublicThread,
-		},
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
 	})
+
+	out := captureStdout(t, func() {
+		handleThreadUpdate(nil, db, stmts, &discordgo.ThreadUpdate{
+			Channel: &discordgo.Channel{
+				ID:       "thread-1",
+				GuildID:  "guild-10",
+				ParentID: "channel-parent",
+				Name:     "topic-b",
+				Type:     discordgo.ChannelTypeGuildPublicThread,
+			},
+			BeforeUpdate: &discordgo.Channel{
+				ID:       "thread-1",
+				GuildID:  "guild-10",
+				ParentID: "channel-parent",
+				Name:     "topic-a",
+				Type:     discordgo.ChannelTypeGuildPublicThread,
+			},
+		})
+	})
+
+	var mappedName string
+	if err := db.QueryRow(
+		selectNameHumanByTypeEntityGuildQuery,
+		nameMappingEntityChannel, "thread-1", "guild-10",
+	).Scan(&mappedName); err != nil {
+		t.Fatalf("query updated thread name mapping failed: %v", err)
+	}
+	if mappedName != "topic-b" {
+		t.Fatalf("mapped thread name mismatch: got %q want %q", mappedName, "topic-b")
+	}
 
 	var payloadJSON string
 	if err := db.QueryRow(
@@ -1408,6 +1434,86 @@ func TestHandleThreadUpdate_LogsRenameAndUpdatesMapping(t *testing.T) {
 	}
 	if payload["before_name"] != "topic-a" || payload["after_name"] != "topic-b" {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+
+	if !strings.Contains(out, "Server: Example Server\n") ||
+		!strings.Contains(out, "Event: thread_renamed\n") ||
+		!strings.Contains(out, "Message: Thread was renamed from topic-a to topic-b\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected thread rename stdout:\n%s", out)
+	}
+}
+
+func TestHandleThreadUpdate_LogsRenameFromStoredNameWhenBeforeUpdateMissing(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-10b",
+			Name: "Example Server",
+		},
+	})
+	handleThreadCreate(stmts, &discordgo.ThreadCreate{
+		Channel: &discordgo.Channel{
+			ID:       "thread-10b",
+			GuildID:  "guild-10b",
+			ParentID: "channel-parent",
+			Name:     "topic-a",
+			Type:     discordgo.ChannelTypeGuildPublicThread,
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleThreadUpdate(nil, db, stmts, &discordgo.ThreadUpdate{
+			Channel: &discordgo.Channel{
+				ID:       "thread-10b",
+				GuildID:  "guild-10b",
+				ParentID: "channel-parent",
+				Name:     "topic-b",
+				Type:     discordgo.ChannelTypeGuildPublicThread,
+			},
+		})
+	})
+
+	var mappedName string
+	if err := db.QueryRow(
+		selectNameHumanByTypeEntityGuildQuery,
+		nameMappingEntityChannel, "thread-10b", "guild-10b",
+	).Scan(&mappedName); err != nil {
+		t.Fatalf("query updated thread name mapping failed: %v", err)
+	}
+	if mappedName != "topic-b" {
+		t.Fatalf("mapped thread name mismatch: got %q want %q", mappedName, "topic-b")
+	}
+
+	var payloadJSON string
+	if err := db.QueryRow(
+		selectLifecyclePayloadByTypeGuildChannelLatestQuery,
+		string(eventThreadRenamed), "guild-10b", "thread-10b",
+	).Scan(&payloadJSON); err != nil {
+		t.Fatalf("query thread rename event failed: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if payload["before_name"] != "topic-a" || payload["after_name"] != "topic-b" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+
+	if !strings.Contains(out, "Server: Example Server\n") ||
+		!strings.Contains(out, "Event: thread_renamed\n") ||
+		!strings.Contains(out, "Message: Thread was renamed from topic-a to topic-b\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected thread rename stdout:\n%s", out)
 	}
 }
 

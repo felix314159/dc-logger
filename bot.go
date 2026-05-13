@@ -912,7 +912,7 @@ func registerHandlers(
 			return
 		}
 		if entry := guildDBs.get(t.GuildID); entry != nil {
-			handleThreadUpdate(entry.stmts, t)
+			handleThreadUpdate(s, entry.db, entry.stmts, t)
 		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadDelete) {
@@ -2062,20 +2062,17 @@ func handleThreadCreate(stmts *preparedStatements, t *discordgo.ThreadCreate) {
 	)
 }
 
-func handleThreadUpdate(stmts *preparedStatements, t *discordgo.ThreadUpdate) {
+func handleThreadUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, t *discordgo.ThreadUpdate) {
 	if t == nil || t.Channel == nil || t.GuildID == "" {
 		return
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	beforeName := threadUpdateBeforeName(db, t)
 	if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, t.GuildID, t.Channel, now); err != nil {
 		logDBErr("thread upsert failed (thread=%s): %v", t.ID, err)
 	}
 
-	if t.BeforeUpdate == nil {
-		return
-	}
-	beforeName := strings.TrimSpace(t.BeforeUpdate.Name)
 	afterName := strings.TrimSpace(t.Name)
 	if beforeName == "" || afterName == "" || beforeName == afterName {
 		return
@@ -2100,6 +2097,19 @@ func handleThreadUpdate(stmts *preparedStatements, t *discordgo.ThreadUpdate) {
 		logDBErr("event insert failed (type=%s thread=%s): %v", eventThreadRenamed, t.ID, err)
 	}
 	logTrackedEvent(eventThreadRenamed, t.GuildID, t.ID, "", "", payload)
+	logThreadRenamedEvent(s, db, t.GuildID, beforeName, afterName, now)
+}
+
+func threadUpdateBeforeName(db *sql.DB, t *discordgo.ThreadUpdate) string {
+	if t == nil {
+		return ""
+	}
+	if t.BeforeUpdate != nil {
+		if name := strings.TrimSpace(t.BeforeUpdate.Name); name != "" {
+			return name
+		}
+	}
+	return currentMappedName(db, nameMappingEntityChannel, t.ID, t.GuildID)
 }
 
 func handleThreadDelete(stmts *preparedStatements, t *discordgo.ThreadDelete) {
@@ -2338,6 +2348,23 @@ func logGuildRenamedEvent(
 	}
 	message := fmt.Sprintf("Server was renamed from %s to %s", beforeName, afterName)
 	logLiveLifecycleEvent(serverName, eventGuildRenamed, message, eventAt)
+}
+
+func logThreadRenamedEvent(
+	s *discordgo.Session,
+	db *sql.DB,
+	guildID, beforeName, afterName, eventAt string,
+) {
+	if !trackedEventLoggingEnabled.Load() {
+		return
+	}
+
+	serverName := resolveGuildDisplayNameByID(s, db, guildID)
+	if strings.TrimSpace(serverName) == "" {
+		serverName = guildID
+	}
+	message := fmt.Sprintf("Thread was renamed from %s to %s", beforeName, afterName)
+	logLiveLifecycleEvent(serverName, eventThreadRenamed, message, eventAt)
 }
 
 func logChannelCreatedEvent(s *discordgo.Session, db *sql.DB, guildID, channelName, eventAt string) {
