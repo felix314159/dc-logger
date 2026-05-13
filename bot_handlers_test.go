@@ -1248,6 +1248,83 @@ func TestHandleChannelUpdate_LogsRenameFromStoredNameWhenBeforeUpdateMissing(t *
 	}
 }
 
+func TestHandleChannelDelete_LogsAndKeepsLocalBackupRows(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-9c",
+			Name: "Example Server",
+		},
+	})
+	handleChannelCreate(stmts, &discordgo.ChannelCreate{
+		Channel: &discordgo.Channel{
+			ID:      "channel-9c",
+			GuildID: "guild-9c",
+			Name:    "general",
+			Type:    discordgo.ChannelTypeGuildText,
+		},
+	})
+	if _, err := stmts.insertMsg.Exec(
+		"message-9c",
+		"guild-9c",
+		"channel-9c",
+		"user-9c",
+		"2026-03-02T16:28:15Z",
+		"keep me",
+		"",
+		"",
+		"",
+		"",
+		"",
+	); err != nil {
+		t.Fatalf("seed message failed: %v", err)
+	}
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleChannelDelete(nil, db, stmts, &discordgo.ChannelDelete{
+			Channel: &discordgo.Channel{
+				ID:      "channel-9c",
+				GuildID: "guild-9c",
+				Name:    "general",
+				Type:    discordgo.ChannelTypeGuildText,
+			},
+		})
+	})
+
+	if got := mustCount(t, db, countChannelsByChannelIDQuery, "channel-9c"); got != 1 {
+		t.Fatalf("channel row count mismatch after remote delete: got %d want 1", got)
+	}
+	if got := mustCount(t, db, countMessagesByChannelIDQuery, "channel-9c"); got != 1 {
+		t.Fatalf("message row count mismatch after remote delete: got %d want 1", got)
+	}
+
+	var payloadJSON string
+	if err := db.QueryRow(
+		selectLifecyclePayloadByTypeGuildChannelLatestQuery,
+		string(eventChannelDeleted), "guild-9c", "channel-9c",
+	).Scan(&payloadJSON); err != nil {
+		t.Fatalf("query channel delete event failed: %v", err)
+	}
+	if strings.TrimSpace(payloadJSON) == "" {
+		t.Fatal("expected channel delete payload")
+	}
+
+	if !strings.Contains(out, "Server: Example Server\n") ||
+		!strings.Contains(out, "Event: channel_deleted\n") ||
+		!strings.Contains(out, "Message: Channel general was deleted\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected channel delete stdout:\n%s", out)
+	}
+}
+
 func TestHandleThreadUpdate_LogsRenameAndUpdatesMapping(t *testing.T) {
 	db, stmts := openTestDB(t)
 

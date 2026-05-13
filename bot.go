@@ -896,7 +896,7 @@ func registerHandlers(
 			return
 		}
 		if entry := guildDBs.get(c.GuildID); entry != nil {
-			handleChannelDelete(entry.stmts, c)
+			handleChannelDelete(s, entry.db, entry.stmts, c)
 		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, t *discordgo.ThreadCreate) {
@@ -1965,12 +1965,14 @@ func channelUpdateBeforeName(db *sql.DB, c *discordgo.ChannelUpdate) string {
 	return currentMappedName(db, nameMappingEntityChannel, c.ID, c.GuildID)
 }
 
-func handleChannelDelete(stmts *preparedStatements, c *discordgo.ChannelDelete) {
+func handleChannelDelete(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, c *discordgo.ChannelDelete) {
 	if c == nil || c.Channel == nil || c.GuildID == "" || c.Channel.IsThread() {
 		return
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	channelName := channelDeleteName(db, c)
+	// Keep local backup rows intact; this only records remote deletion metadata.
 	if _, err := stmts.markChannelDeleted.Exec(now, now, c.ID); err != nil {
 		logDBErr("mark channel deleted failed (channel=%s): %v", c.ID, err)
 	}
@@ -1996,6 +1998,23 @@ func handleChannelDelete(stmts *preparedStatements, c *discordgo.ChannelDelete) 
 		"",
 		channelEventPayload(c.Channel),
 	)
+	logChannelDeletedEvent(s, db, c.GuildID, channelName, now)
+}
+
+func channelDeleteName(db *sql.DB, c *discordgo.ChannelDelete) string {
+	if c == nil {
+		return ""
+	}
+	if c.Channel != nil {
+		if name := strings.TrimSpace(c.Channel.Name); name != "" {
+			return name
+		}
+	}
+	name := currentMappedName(db, nameMappingEntityChannel, c.ID, c.GuildID)
+	if name == "" {
+		name = c.ID
+	}
+	return name
 }
 
 func handleThreadCreate(stmts *preparedStatements, t *discordgo.ThreadCreate) {
@@ -2288,9 +2307,26 @@ func logChannelRenamedEvent(
 		serverName = guildID
 	}
 	message := fmt.Sprintf("Channel was renamed from %s to %s", beforeName, afterName)
+	logLiveLifecycleEvent(serverName, eventChannelRenamed, message, eventAt)
+}
+
+func logChannelDeletedEvent(s *discordgo.Session, db *sql.DB, guildID, channelName, eventAt string) {
+	if !trackedEventLoggingEnabled.Load() {
+		return
+	}
+
+	serverName := resolveGuildDisplayNameByID(s, db, guildID)
+	if strings.TrimSpace(serverName) == "" {
+		serverName = guildID
+	}
+	message := fmt.Sprintf("Channel %s was deleted", channelName)
+	logLiveLifecycleEvent(serverName, eventChannelDeleted, message, eventAt)
+}
+
+func logLiveLifecycleEvent(serverName string, eventType lifecycleEventType, message, eventAt string) {
 	logText := renderLifecycleEventLogWithServer(
 		serverName,
-		string(eventChannelRenamed),
+		string(eventType),
 		message,
 		formatMessageSentTime(eventAt, ""),
 	)
@@ -2380,11 +2416,15 @@ func renderLifecycleEventLogWithServer(serverName, eventType, message, eventTime
 	if serverName = strings.TrimSpace(serverName); serverName != "" {
 		serverLine = fmt.Sprintf("Server: %s\n", serverName)
 	}
+	messageLine := ""
+	if message = strings.TrimSpace(message); message != "" {
+		messageLine = fmt.Sprintf("Message: %s\n", message)
+	}
 	return fmt.Sprintf(
-		"%sEvent: %s\nMessage: %s\nTime: %s\n\n",
+		"%sEvent: %s\n%sTime: %s\n\n",
 		serverLine,
 		eventType,
-		message,
+		messageLine,
 		eventTime,
 	)
 }
