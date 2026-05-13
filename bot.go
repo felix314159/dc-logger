@@ -2263,7 +2263,7 @@ func logMessageModifiedEvent(
 	guildID, channelID, messageID, senderName, oldContent, newContent, modifiedAt string,
 	hasOldContent bool,
 ) {
-	logMessageEvent(s, db, "message_modified", guildID, channelID, messageID, senderName, newContent, modifiedAt, oldContent, hasOldContent, "")
+	logMessageEvent(s, db, string(eventMessageModified), guildID, channelID, messageID, senderName, newContent, modifiedAt, oldContent, hasOldContent, "")
 }
 
 func logReactionEvent(
@@ -2364,7 +2364,7 @@ func renderMessageEventLogWithServer(serverName, eventType, senderName, threadNa
 		}
 	}
 	if hasOldContent {
-		if eventType == "message_modified" {
+		if eventType == string(eventMessageModified) {
 			oldContent = colorizeTerminalText(oldContent, ansiLightRed)
 			content = colorizeTerminalText(content, ansiGreen)
 		}

@@ -10,12 +10,13 @@ import (
 type lifecycleEventType string
 
 const (
-	eventMessageSent     lifecycleEventType = "message_sent"
+	eventMessageSent     lifecycleEventType = "message_sent" // working well
 	eventMessageSkipped  lifecycleEventType = "message_skipped"
-	eventMessageUpdated  lifecycleEventType = "message_updated"
-	eventMessageDeleted  lifecycleEventType = "message_deleted"
-	eventReactionAdded   lifecycleEventType = "reaction_added"
-	eventReactionRemoved lifecycleEventType = "reaction_removed"
+	eventMessageUpdated  lifecycleEventType = "message_updated" // ?? we call it message_modified
+	eventMessageModified lifecycleEventType = "message_modified"
+	eventMessageDeleted  lifecycleEventType = "message_deleted"  // working well
+	eventReactionAdded   lifecycleEventType = "reaction_added"   // working well
+	eventReactionRemoved lifecycleEventType = "reaction_removed" // working well
 	eventThreadCreated   lifecycleEventType = "thread_created"
 	eventThreadDeleted   lifecycleEventType = "thread_deleted"
 	eventThreadRenamed   lifecycleEventType = "thread_renamed"
