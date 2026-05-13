@@ -739,16 +739,13 @@ func registerHandlers(
 			return
 		}
 		if !syncEnabled.Load() {
-			logSkippedMessageCreate(m, "sync_disabled")
 			return
 		}
 		if !guildFilter.allows(m.GuildID) {
-			logSkippedMessageCreate(m, "guild_filter_rejected")
 			return
 		}
 		entry := guildDBs.get(m.GuildID)
 		if entry == nil {
-			logSkippedMessageCreate(m, "guild_database_missing")
 			return
 		}
 		handleMessageCreate(s, entry.db, entry.stmts, m)
@@ -915,11 +912,9 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 		return
 	}
 	if m.Author != nil && m.Author.Bot {
-		logSkippedMessageCreate(m, "author_is_bot")
 		return
 	}
 	if m.GuildID == "" {
-		logSkippedMessageCreate(m, "dm_message")
 		return // ignore DMs for now
 	}
 
@@ -927,7 +922,6 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 	// but keep attachment-only user messages (e.g. long text sent as .txt).
 	// We still advance channel state so backfill does not reprocess skipped IDs forever.
 	if m.Content == "" && len(m.Attachments) == 0 {
-		logSkippedMessageCreate(m, "structural_empty_message")
 		if err := updateHighWaterMark(db, stmts.upsertState, m.GuildID, m.ChannelID, m.ID); err != nil {
 			logDBErr("state update failed (channel=%s): %v", m.ChannelID, err)
 		}
@@ -1033,32 +1027,6 @@ func handleMessageCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatem
 
 	logContent := messageSentLogContent(m.Content, attachmentLogContent)
 	logMessageSentEvent(s, db, m.GuildID, m.ChannelID, m.ID, senderName, logContent, createdAt)
-}
-
-func logSkippedMessageCreate(m *discordgo.MessageCreate, reason string) {
-	if m == nil || m.Message == nil {
-		return
-	}
-	authorID := ""
-	authorIsBot := false
-	if m.Author != nil {
-		authorID = m.Author.ID
-		authorIsBot = m.Author.Bot
-	}
-	logTrackedEvent(
-		eventMessageSkipped,
-		m.GuildID,
-		m.ChannelID,
-		m.ID,
-		authorID,
-		map[string]any{
-			"skip_reason":       reason,
-			"author_is_bot":     authorIsBot,
-			"content":           m.Content,
-			"attachments_count": len(m.Attachments),
-			"embeds_count":      len(m.Embeds),
-		},
-	)
 }
 
 func handleMessageUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, m *discordgo.MessageUpdate) {
