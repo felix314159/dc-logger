@@ -888,7 +888,7 @@ func registerHandlers(
 			return
 		}
 		if entry := guildDBs.get(c.GuildID); entry != nil {
-			handleChannelUpdate(entry.stmts, c)
+			handleChannelUpdate(s, entry.db, entry.stmts, c)
 		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelDelete) {
@@ -1916,20 +1916,17 @@ func handleChannelCreate(stmts *preparedStatements, c *discordgo.ChannelCreate) 
 	)
 }
 
-func handleChannelUpdate(stmts *preparedStatements, c *discordgo.ChannelUpdate) {
+func handleChannelUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, c *discordgo.ChannelUpdate) {
 	if c == nil || c.Channel == nil || c.GuildID == "" || c.Channel.IsThread() {
 		return
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	beforeName := channelUpdateBeforeName(db, c)
 	if err := upsertChannelRow(stmts.upsertChannel, stmts.upsertIDNameMapping, c.GuildID, c.Channel, now); err != nil {
 		logDBErr("channel upsert failed (channel=%s): %v", c.ID, err)
 	}
 
-	if c.BeforeUpdate == nil {
-		return
-	}
-	beforeName := strings.TrimSpace(c.BeforeUpdate.Name)
 	afterName := strings.TrimSpace(c.Name)
 	if beforeName == "" || afterName == "" || beforeName == afterName {
 		return
@@ -1953,6 +1950,19 @@ func handleChannelUpdate(stmts *preparedStatements, c *discordgo.ChannelUpdate) 
 		logDBErr("event insert failed (type=%s channel=%s): %v", eventChannelRenamed, c.ID, err)
 	}
 	logTrackedEvent(eventChannelRenamed, c.GuildID, c.ID, "", "", payload)
+	logChannelRenamedEvent(s, db, c.GuildID, beforeName, afterName, now)
+}
+
+func channelUpdateBeforeName(db *sql.DB, c *discordgo.ChannelUpdate) string {
+	if c == nil {
+		return ""
+	}
+	if c.BeforeUpdate != nil {
+		if name := strings.TrimSpace(c.BeforeUpdate.Name); name != "" {
+			return name
+		}
+	}
+	return currentMappedName(db, nameMappingEntityChannel, c.ID, c.GuildID)
 }
 
 func handleChannelDelete(stmts *preparedStatements, c *discordgo.ChannelDelete) {
@@ -2264,6 +2274,38 @@ func logReactionEvent(
 	logMessageEvent(s, db, string(eventType), guildID, channelID, messageID, userName, messageURL, eventAt, "", false, reactionDisplay)
 }
 
+func logChannelRenamedEvent(
+	s *discordgo.Session,
+	db *sql.DB,
+	guildID, beforeName, afterName, eventAt string,
+) {
+	if !trackedEventLoggingEnabled.Load() {
+		return
+	}
+
+	serverName := resolveGuildDisplayNameByID(s, db, guildID)
+	if strings.TrimSpace(serverName) == "" {
+		serverName = guildID
+	}
+	message := fmt.Sprintf("Channel was renamed from %s to %s", beforeName, afterName)
+	logText := renderLifecycleEventLogWithServer(
+		serverName,
+		string(eventChannelRenamed),
+		message,
+		formatMessageSentTime(eventAt, ""),
+	)
+
+	liveMessageLogPrintMu.Lock()
+	defer liveMessageLogPrintMu.Unlock()
+	if liveMessageLogSeparatorsEnabled.Load() {
+		if liveMessageLogPrintedSinceSeparatorsEnabled {
+			fmt.Print(renderLiveMessageLogSeparator())
+		}
+		liveMessageLogPrintedSinceSeparatorsEnabled = true
+	}
+	fmt.Print(logText)
+}
+
 func logMessageEvent(
 	s *discordgo.Session,
 	db *sql.DB,
@@ -2331,6 +2373,20 @@ func renderMessageSentEventLog(senderName, threadName, channelName, content, eve
 
 func renderMessageEventLog(eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool, reactionDisplay string) string {
 	return renderMessageEventLogWithServer("", eventType, senderName, threadName, channelName, content, eventTime, oldContent, hasOldContent, reactionDisplay)
+}
+
+func renderLifecycleEventLogWithServer(serverName, eventType, message, eventTime string) string {
+	serverLine := ""
+	if serverName = strings.TrimSpace(serverName); serverName != "" {
+		serverLine = fmt.Sprintf("Server: %s\n", serverName)
+	}
+	return fmt.Sprintf(
+		"%sEvent: %s\nMessage: %s\nTime: %s\n\n",
+		serverLine,
+		eventType,
+		message,
+		eventTime,
+	)
 }
 
 func renderMessageEventLogWithServer(serverName, eventType, senderName, threadName, channelName, content, eventTime, oldContent string, hasOldContent bool, reactionDisplay string) string {

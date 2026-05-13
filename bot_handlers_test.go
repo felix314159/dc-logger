@@ -1134,7 +1134,7 @@ func TestHandleChannelUpdate_LogsRenameAndUpdatesMapping(t *testing.T) {
 		},
 	})
 
-	handleChannelUpdate(stmts, &discordgo.ChannelUpdate{
+	handleChannelUpdate(nil, db, stmts, &discordgo.ChannelUpdate{
 		Channel: &discordgo.Channel{
 			ID:      "channel-9",
 			GuildID: "guild-9",
@@ -1174,6 +1174,77 @@ func TestHandleChannelUpdate_LogsRenameAndUpdatesMapping(t *testing.T) {
 	}
 	if payload["before_name"] != "general" || payload["after_name"] != "announcements" {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestHandleChannelUpdate_LogsRenameFromStoredNameWhenBeforeUpdateMissing(t *testing.T) {
+	db, stmts := openTestDB(t)
+
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-9b",
+			Name: "Example Server",
+		},
+	})
+	handleChannelCreate(stmts, &discordgo.ChannelCreate{
+		Channel: &discordgo.Channel{
+			ID:      "channel-9b",
+			GuildID: "guild-9b",
+			Name:    "general",
+			Type:    discordgo.ChannelTypeGuildText,
+		},
+	})
+
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleChannelUpdate(nil, db, stmts, &discordgo.ChannelUpdate{
+			Channel: &discordgo.Channel{
+				ID:      "channel-9b",
+				GuildID: "guild-9b",
+				Name:    "announcements",
+				Type:    discordgo.ChannelTypeGuildText,
+			},
+		})
+	})
+
+	var mappedName string
+	if err := db.QueryRow(
+		selectNameHumanByTypeEntityGuildQuery,
+		nameMappingEntityChannel, "channel-9b", "guild-9b",
+	).Scan(&mappedName); err != nil {
+		t.Fatalf("query updated channel name mapping failed: %v", err)
+	}
+	if mappedName != "announcements" {
+		t.Fatalf("mapped name mismatch: got %q want %q", mappedName, "announcements")
+	}
+
+	var payloadJSON string
+	if err := db.QueryRow(
+		selectLifecyclePayloadByTypeGuildChannelLatestQuery,
+		string(eventChannelRenamed), "guild-9b", "channel-9b",
+	).Scan(&payloadJSON); err != nil {
+		t.Fatalf("query channel rename event failed: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("unmarshal payload failed: %v", err)
+	}
+	if payload["before_name"] != "general" || payload["after_name"] != "announcements" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+
+	if !strings.Contains(out, "Server: Example Server\n") ||
+		!strings.Contains(out, "Event: channel_renamed\n") ||
+		!strings.Contains(out, "Message: Channel was renamed from general to announcements\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected channel rename stdout:\n%s", out)
 	}
 }
 
