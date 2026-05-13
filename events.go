@@ -19,7 +19,7 @@ const (
 	eventThreadCreated   lifecycleEventType = "thread_created"
 	eventThreadDeleted   lifecycleEventType = "thread_deleted"
 	eventThreadRenamed   lifecycleEventType = "thread_renamed"
-	eventChannelCreated  lifecycleEventType = "channel_created"
+	eventChannelCreated  lifecycleEventType = "channel_created" // working well
 	eventChannelDeleted  lifecycleEventType = "channel_deleted" // working well
 	eventChannelRenamed  lifecycleEventType = "channel_renamed" // working well
 	eventGuildRenamed    lifecycleEventType = "guild_renamed"

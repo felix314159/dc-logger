@@ -880,7 +880,7 @@ func registerHandlers(
 			return
 		}
 		if entry := guildDBs.get(c.GuildID); entry != nil {
-			handleChannelCreate(entry.stmts, c)
+			handleChannelCreate(s, entry.db, entry.stmts, c)
 		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, c *discordgo.ChannelUpdate) {
@@ -1883,7 +1883,7 @@ func handleGuildMemberUpdate(db *sql.DB, stmts *preparedStatements, m *discordgo
 	logTrackedEvent(eventUsernameChanged, m.GuildID, "", "", m.User.ID, payload)
 }
 
-func handleChannelCreate(stmts *preparedStatements, c *discordgo.ChannelCreate) {
+func handleChannelCreate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, c *discordgo.ChannelCreate) {
 	if c == nil || c.Channel == nil || c.GuildID == "" || c.Channel.IsThread() {
 		return
 	}
@@ -1914,6 +1914,7 @@ func handleChannelCreate(stmts *preparedStatements, c *discordgo.ChannelCreate) 
 		"",
 		channelEventPayload(c.Channel),
 	)
+	logChannelCreatedEvent(s, db, c.GuildID, channelLifecycleName(c.Channel), now)
 }
 
 func handleChannelUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, c *discordgo.ChannelUpdate) {
@@ -2005,16 +2006,24 @@ func channelDeleteName(db *sql.DB, c *discordgo.ChannelDelete) string {
 	if c == nil {
 		return ""
 	}
-	if c.Channel != nil {
-		if name := strings.TrimSpace(c.Channel.Name); name != "" {
-			return name
-		}
+	if name := channelLifecycleName(c.Channel); name != "" {
+		return name
 	}
 	name := currentMappedName(db, nameMappingEntityChannel, c.ID, c.GuildID)
 	if name == "" {
 		name = c.ID
 	}
 	return name
+}
+
+func channelLifecycleName(c *discordgo.Channel) string {
+	if c == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(c.Name); name != "" {
+		return name
+	}
+	return strings.TrimSpace(c.ID)
 }
 
 func handleThreadCreate(stmts *preparedStatements, t *discordgo.ThreadCreate) {
@@ -2308,6 +2317,19 @@ func logChannelRenamedEvent(
 	}
 	message := fmt.Sprintf("Channel was renamed from %s to %s", beforeName, afterName)
 	logLiveLifecycleEvent(serverName, eventChannelRenamed, message, eventAt)
+}
+
+func logChannelCreatedEvent(s *discordgo.Session, db *sql.DB, guildID, channelName, eventAt string) {
+	if !trackedEventLoggingEnabled.Load() {
+		return
+	}
+
+	serverName := resolveGuildDisplayNameByID(s, db, guildID)
+	if strings.TrimSpace(serverName) == "" {
+		serverName = guildID
+	}
+	message := fmt.Sprintf("Channel %s was created", channelName)
+	logLiveLifecycleEvent(serverName, eventChannelCreated, message, eventAt)
 }
 
 func logChannelDeletedEvent(s *discordgo.Session, db *sql.DB, guildID, channelName, eventAt string) {

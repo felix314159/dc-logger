@@ -1057,13 +1057,28 @@ func TestHandleMessageCreate_UpsertsUserNameMapping(t *testing.T) {
 func TestHandleChannelCreate_UpsertsChannelNameMapping(t *testing.T) {
 	db, stmts := openTestDB(t)
 
-	handleChannelCreate(stmts, &discordgo.ChannelCreate{
-		Channel: &discordgo.Channel{
-			ID:      "channel-7",
-			GuildID: "guild-7",
-			Name:    "general",
-			Type:    discordgo.ChannelTypeGuildText,
+	handleGuildCreate(stmts, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-7",
+			Name: "Example Server",
 		},
+	})
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleChannelCreate(nil, db, stmts, &discordgo.ChannelCreate{
+			Channel: &discordgo.Channel{
+				ID:      "channel-7",
+				GuildID: "guild-7",
+				Name:    "general",
+				Type:    discordgo.ChannelTypeGuildText,
+			},
+		})
 	})
 
 	var mappedID string
@@ -1075,6 +1090,15 @@ func TestHandleChannelCreate_UpsertsChannelNameMapping(t *testing.T) {
 	}
 	if mappedID != "channel-7" {
 		t.Fatalf("entity_id mismatch: got %q want %q", mappedID, "channel-7")
+	}
+	if got := mustCount(t, db, countChannelsByChannelIDQuery, "channel-7"); got != 1 {
+		t.Fatalf("channel row count mismatch after create: got %d want 1", got)
+	}
+	if !strings.Contains(out, "Server: Example Server\n") ||
+		!strings.Contains(out, "Event: channel_created\n") ||
+		!strings.Contains(out, "Message: Channel general was created\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected channel create stdout:\n%s", out)
 	}
 }
 
@@ -1125,7 +1149,7 @@ func TestHandleGuildCreateAndUpdate_UpsertGuildNameMapping(t *testing.T) {
 func TestHandleChannelUpdate_LogsRenameAndUpdatesMapping(t *testing.T) {
 	db, stmts := openTestDB(t)
 
-	handleChannelCreate(stmts, &discordgo.ChannelCreate{
+	handleChannelCreate(nil, db, stmts, &discordgo.ChannelCreate{
 		Channel: &discordgo.Channel{
 			ID:      "channel-9",
 			GuildID: "guild-9",
@@ -1186,7 +1210,7 @@ func TestHandleChannelUpdate_LogsRenameFromStoredNameWhenBeforeUpdateMissing(t *
 			Name: "Example Server",
 		},
 	})
-	handleChannelCreate(stmts, &discordgo.ChannelCreate{
+	handleChannelCreate(nil, db, stmts, &discordgo.ChannelCreate{
 		Channel: &discordgo.Channel{
 			ID:      "channel-9b",
 			GuildID: "guild-9b",
@@ -1257,7 +1281,7 @@ func TestHandleChannelDelete_LogsAndKeepsLocalBackupRows(t *testing.T) {
 			Name: "Example Server",
 		},
 	})
-	handleChannelCreate(stmts, &discordgo.ChannelCreate{
+	handleChannelCreate(nil, db, stmts, &discordgo.ChannelCreate{
 		Channel: &discordgo.Channel{
 			ID:      "channel-9c",
 			GuildID: "guild-9c",
