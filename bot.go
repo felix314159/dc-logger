@@ -816,7 +816,7 @@ func registerHandlers(
 			return
 		}
 		if entry := guildDBs.get(g.ID); entry != nil {
-			handleGuildUpdate(entry.db, entry.stmts, g)
+			handleGuildUpdate(s, entry.db, entry.stmts, g)
 		}
 	})
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.GuildRoleCreate) {
@@ -1520,7 +1520,7 @@ func handleGuildCreate(stmts *preparedStatements, g *discordgo.GuildCreate) {
 	syncMemberRolesFromGuild(stmts, g.Guild, now)
 }
 
-func handleGuildUpdate(db *sql.DB, stmts *preparedStatements, g *discordgo.GuildUpdate) {
+func handleGuildUpdate(s *discordgo.Session, db *sql.DB, stmts *preparedStatements, g *discordgo.GuildUpdate) {
 	if g == nil || g.Guild == nil || g.ID == "" {
 		return
 	}
@@ -1551,6 +1551,7 @@ func handleGuildUpdate(db *sql.DB, stmts *preparedStatements, g *discordgo.Guild
 			logDBErr("event insert failed (type=%s guild=%s): %v", eventGuildRenamed, g.ID, err)
 		}
 		logTrackedEvent(eventGuildRenamed, g.ID, "", "", "", payload)
+		logGuildRenamedEvent(s, db, g.ID, beforeName, afterName, now)
 	}
 }
 
@@ -2317,6 +2318,26 @@ func logChannelRenamedEvent(
 	}
 	message := fmt.Sprintf("Channel was renamed from %s to %s", beforeName, afterName)
 	logLiveLifecycleEvent(serverName, eventChannelRenamed, message, eventAt)
+}
+
+func logGuildRenamedEvent(
+	s *discordgo.Session,
+	db *sql.DB,
+	guildID, beforeName, afterName, eventAt string,
+) {
+	if !trackedEventLoggingEnabled.Load() {
+		return
+	}
+
+	serverName := strings.TrimSpace(afterName)
+	if serverName == "" {
+		serverName = resolveGuildDisplayNameByID(s, db, guildID)
+	}
+	if serverName == "" {
+		serverName = guildID
+	}
+	message := fmt.Sprintf("Server was renamed from %s to %s", beforeName, afterName)
+	logLiveLifecycleEvent(serverName, eventGuildRenamed, message, eventAt)
 }
 
 func logChannelCreatedEvent(s *discordgo.Session, db *sql.DB, guildID, channelName, eventAt string) {

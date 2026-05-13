@@ -3,8 +3,10 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +54,11 @@ func (r *guildDatabaseRegistry) openGuild(s *discordgo.Session, g *discordgo.Gui
 
 	guildName := resolveGuildDisplayName(s, nil, g)
 	path := guildDatabasePath(r.basePath, guildName, guildID)
+	if existingPath, err := existingGuildDatabasePath(r.basePath, guildID, path); err != nil {
+		return nil, err
+	} else if existingPath != "" {
+		path = existingPath
+	}
 	db, err := openAndInitDB(path)
 	if err != nil {
 		return nil, err
@@ -157,6 +164,15 @@ func (r *guildDatabaseRegistry) stopFileMonitor() {
 }
 
 func guildDatabasePath(basePath, guildName, guildID string) string {
+	dir := guildDatabaseDir(basePath)
+	name := sanitizeGuildDatabaseName(guildName)
+	if name == "" {
+		name = "server"
+	}
+	return filepath.Join(dir, fmt.Sprintf("db_%s_%s.db", name, strings.TrimSpace(guildID)))
+}
+
+func guildDatabaseDir(basePath string) string {
 	dir := basePath
 	if strings.TrimSpace(dir) == "" {
 		dir = "."
@@ -164,11 +180,46 @@ func guildDatabasePath(basePath, guildName, guildID string) string {
 	if ext := filepath.Ext(dir); ext != "" {
 		dir = filepath.Dir(dir)
 	}
-	name := sanitizeGuildDatabaseName(guildName)
-	if name == "" {
-		name = "server"
+	return dir
+}
+
+func existingGuildDatabasePath(basePath, guildID, preferredPath string) (string, error) {
+	guildID = strings.TrimSpace(guildID)
+	if guildID == "" {
+		return "", nil
 	}
-	return filepath.Join(dir, fmt.Sprintf("db_%s_%s.db", name, strings.TrimSpace(guildID)))
+
+	dir := guildDatabaseDir(basePath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read database directory %q: %w", dir, err)
+	}
+
+	preferredName := filepath.Base(preferredPath)
+	suffix := "_" + guildID + ".db"
+	matches := make([]string, 0, 1)
+	for _, entry := range entries {
+		if entry == nil || entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "db_") || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if name == preferredName {
+			return path, nil
+		}
+		matches = append(matches, path)
+	}
+	if len(matches) == 0 {
+		return "", nil
+	}
+	sort.Strings(matches)
+	return matches[0], nil
 }
 
 func sanitizeGuildDatabaseName(name string) string {

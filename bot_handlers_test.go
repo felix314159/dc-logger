@@ -1111,11 +1111,20 @@ func TestHandleGuildCreateAndUpdate_UpsertGuildNameMapping(t *testing.T) {
 			Name: "Lorem",
 		},
 	})
-	handleGuildUpdate(db, stmts, &discordgo.GuildUpdate{
-		Guild: &discordgo.Guild{
-			ID:   "guild-8",
-			Name: "Lorem Inc",
-		},
+	setTrackedEventLoggingEnabled(true)
+	setLiveMessageLogSeparatorsEnabled(false)
+	t.Cleanup(func() {
+		setTrackedEventLoggingEnabled(false)
+		setLiveMessageLogSeparatorsEnabled(false)
+	})
+
+	out := captureStdout(t, func() {
+		handleGuildUpdate(nil, db, stmts, &discordgo.GuildUpdate{
+			Guild: &discordgo.Guild{
+				ID:   "guild-8",
+				Name: "Lorem Inc",
+			},
+		})
 	})
 
 	var humanName string
@@ -1143,6 +1152,12 @@ func TestHandleGuildCreateAndUpdate_UpsertGuildNameMapping(t *testing.T) {
 	}
 	if payload["before_name"] != "Lorem" || payload["after_name"] != "Lorem Inc" {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(out, "Server: Lorem Inc\n") ||
+		!strings.Contains(out, "Event: guild_renamed\n") ||
+		!strings.Contains(out, "Message: Server was renamed from Lorem to Lorem Inc\n") ||
+		!strings.Contains(out, "Time: ") {
+		t.Fatalf("unexpected guild rename stdout:\n%s", out)
 	}
 }
 
