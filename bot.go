@@ -508,7 +508,15 @@ const (
 	memberRemovalCauseBanned memberRemovalCause = "banned"
 )
 
+type botOptions struct {
+	skipSync bool
+}
+
 func runBot(token, dbPath string) error {
+	return runBotWithOptions(token, dbPath, botOptions{})
+}
+
+func runBotWithOptions(token, dbPath string, opts botOptions) error {
 	guildDBs := newGuildDatabaseRegistry(dbPath)
 	defer guildDBs.close()
 
@@ -519,7 +527,7 @@ func runBot(token, dbPath string) error {
 	}
 	defer dg.Close()
 
-	registerHandlers(dg, guildDBs, startupFatal)
+	registerHandlers(dg, guildDBs, startupFatal, opts)
 
 	if err := dg.Open(); err != nil {
 		return fmt.Errorf("failed to open websocket: %w", err)
@@ -552,6 +560,7 @@ func registerHandlers(
 	dg *discordgo.Session,
 	guildDBs *guildDatabaseRegistry,
 	startupFatal chan<- error,
+	opts botOptions,
 ) {
 	cfg := loadBackfillConfig()
 	guildFilter := loadGuildSyncFilter()
@@ -637,6 +646,15 @@ func registerHandlers(
 			log.Printf("database monitor detected missing file; aborting sync: %v", err)
 			notifyStartupFatal(startupFatal, fmt.Errorf("database file missing during runtime: %w", err))
 		})
+
+		if opts.skipSync {
+			setLiveMessageLogSeparatorsEnabled(true)
+			setTrackedEventLoggingEnabled(true)
+			syncEnabled.Store(true)
+			log.Println("startup backfill sync skipped by --skip-sync; realtime logging is active")
+			fmt.Printf("%s\n\n", strings.Repeat(string('-'), 158))
+			return
+		}
 
 		channelsByGuild := logChannelSyncPreview(s, guildDBs, trackedReadyGuilds)
 		if !preflightGuildReadAccess(s, guildDBs, trackedReadyGuilds, channelsByGuild) {

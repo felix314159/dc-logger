@@ -110,7 +110,7 @@ Reload env vars (`set -a; source .env; set +a`) and run again.
 
 ## Configuration
 
-This project currently uses **environment variables** (no CLI flags yet).
+This project primarily uses **environment variables** plus a small number of CLI flags.
 Canonical env-var keys/defaults are centralized in `internal/config/env.go`.
 
 ### Required
@@ -183,6 +183,13 @@ Or build and run:
 ```bash
 go build -o dc-logger .
 ./dc-logger
+```
+
+To skip startup backfill sync and go straight to live logging:
+
+```bash
+go run . --skip-sync
+./dc-logger --skip-sync
 ```
 
 ## Programmatic Retrieval (`dc-query`)
